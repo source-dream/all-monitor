@@ -1,0 +1,22 @@
+# AI tools
+.agents/
+.opencode/
+
+# Node
+node_modules/
+web/node_modules/
+web/dist/
+
+# Go
+server/bin/
+server/.env
+server/data/*.db
+server/data/.fuse_hidden*
+server/data/*.xdb
+
+# Local env/config
+*.local
+*.log
+
+# Others
+docs/
