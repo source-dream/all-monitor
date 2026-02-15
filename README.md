@@ -12,18 +12,12 @@ cp .env.example .env
 go run ./cmd/app
 ```
 
-如果本机未启动 PostgreSQL，可在 `server/.env` 设置：
-
-```bash
-DB_DRIVER=sqlite
-SQLITE_DSN=data/all-monitor.db
-```
+可使用PostgreSQL，需要在 `server/.env` 设置
 
 2. 启动前端
 
 ```bash
 cd web
-cp .env.example .env
 npm install
 npm run dev
 ```

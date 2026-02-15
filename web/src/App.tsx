@@ -371,6 +371,8 @@ function buildTrackingSnippet(writeKey: string, publicOrigin: string): string {
 	return `(() => {
   const API_BASE = '${publicOrigin}'
   const WRITE_KEY = '${writeKey}'
+  const ENDPOINT = API_BASE + '/api/ingest/' + WRITE_KEY
+  const ENDPOINT_ORIGIN = new URL(ENDPOINT, location.href).origin
 
   function getClientId() {
     const key = 'ym_monitor_cid'
@@ -389,12 +391,15 @@ function buildTrackingSnippet(writeKey: string, publicOrigin: string): string {
       occurred_at: Date.now(),
       meta,
     }
-    const url = API_BASE + '/api/ingest/' + WRITE_KEY
     const body = JSON.stringify(payload)
     const blob = new Blob([body], { type: 'application/json' })
-    if (navigator.sendBeacon && navigator.sendBeacon(url, blob)) return
-    fetch(url, {
+    if (ENDPOINT_ORIGIN === location.origin) {
+      if (navigator.sendBeacon && navigator.sendBeacon(ENDPOINT, blob)) return
+    }
+    fetch(ENDPOINT, {
       method: 'POST',
+      mode: 'cors',
+      credentials: 'omit',
       headers: { 'Content-Type': 'application/json' },
       body,
       keepalive: true,
@@ -407,12 +412,14 @@ function buildTrackingSnippet(writeKey: string, publicOrigin: string): string {
 }
 
 function buildTrackingScriptTagSnippet(writeKey: string, publicOrigin: string): string {
-	return `<script defer src="${publicOrigin}/sdk/ym-track.min.js" data-write-key="${writeKey}"></script>`
+	return `<script defer src="${publicOrigin}/sdk/ym-track.min.js" data-write-key="${writeKey}" data-api-base="${API_BASE}"></script>`
 }
 
 function buildTrackingManualSnippet(writeKey: string, publicOrigin: string): string {
 	return `fetch('${publicOrigin}/api/ingest/${writeKey}', {
   method: 'POST',
+  mode: 'cors',
+  credentials: 'omit',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
     event_name: 'button_click',
@@ -423,6 +430,23 @@ function buildTrackingManualSnippet(writeKey: string, publicOrigin: string): str
   }),
   keepalive: true,
 })`
+}
+
+function buildTrackingVueSnippet(writeKey: string, publicOrigin: string): string {
+	return `<script lang="ts" setup>
+import { onMounted } from 'vue'
+
+onMounted(() => {
+  if (document.querySelector('script[data-ym-track="1"]')) return
+  const s = document.createElement('script')
+  s.defer = true
+  s.src = '${publicOrigin}/sdk/ym-track.min.js'
+  s.setAttribute('data-write-key', '${writeKey}')
+  s.setAttribute('data-api-base', '${API_BASE}')
+  s.setAttribute('data-ym-track', '1')
+  document.head.appendChild(s)
+})
+</script>`
 }
 
 function presetToHours(preset: '1h' | '6h' | '12h' | '24h' | 'custom'): number {
@@ -982,7 +1006,7 @@ function TargetDetailPage({ token }: { token: string }) {
   const [deleting, setDeleting] = useState(false)
   const [copyDone, setCopyDone] = useState(false)
   const [testingIngest, setTestingIngest] = useState(false)
-  const [guideMode, setGuideMode] = useState<'script' | 'inline' | 'manual'>('script')
+  const [guideMode, setGuideMode] = useState<'script' | 'inline' | 'manual' | 'vue'>('script')
   const [userRankSort, setUserRankSort] = useState<'pv' | 'uv' | 'events' | 'recent'>('pv')
   const [deviceRankSort, setDeviceRankSort] = useState<'pv' | 'uv' | 'events' | 'recent'>('pv')
   const [userRankSearch, setUserRankSearch] = useState('')
@@ -1244,12 +1268,14 @@ function TargetDetailPage({ token }: { token: string }) {
   const trackingSnippet = useMemo(() => buildTrackingSnippet(trackingConfig.write_key, guidePublicOrigin), [trackingConfig.write_key, guidePublicOrigin])
   const trackingScriptTagSnippet = useMemo(() => buildTrackingScriptTagSnippet(trackingConfig.write_key, guidePublicOrigin), [trackingConfig.write_key, guidePublicOrigin])
   const trackingManualSnippet = useMemo(() => buildTrackingManualSnippet(trackingConfig.write_key, guidePublicOrigin), [trackingConfig.write_key, guidePublicOrigin])
+  const trackingVueSnippet = useMemo(() => buildTrackingVueSnippet(trackingConfig.write_key, guidePublicOrigin), [trackingConfig.write_key, guidePublicOrigin])
   const guideCode = useMemo(() => {
 	if (guideMode === 'inline') return trackingSnippet
 	if (guideMode === 'manual') return trackingManualSnippet
+	if (guideMode === 'vue') return trackingVueSnippet
 	return trackingScriptTagSnippet
-  }, [guideMode, trackingManualSnippet, trackingScriptTagSnippet, trackingSnippet])
-  const guideRows = guideMode === 'script' ? 3 : (guideMode === 'manual' ? 12 : 18)
+  }, [guideMode, trackingManualSnippet, trackingScriptTagSnippet, trackingSnippet, trackingVueSnippet])
+  const guideRows = guideMode === 'script' ? 3 : (guideMode === 'manual' ? 14 : 18)
 
   async function handleCopyTrackingSnippet() {
 	if (!trackingConfig.write_key) return
@@ -1838,11 +1864,14 @@ function TargetDetailPage({ token }: { token: string }) {
 			<span>先选方式，再复制代码</span>
 		  </div>
 		  <p className="muted">当前识别域名：{guidePublicOrigin}</p>
+		  <p className="muted">当前 API 基址：{API_BASE}</p>
 		  <p className="muted">1) 选择接入方式并复制；2) 打开页面触发事件；3) 回到本页刷新查看数据。</p>
+		  <p className="muted">跨域时请确保后端 CORS_ALLOW 包含业务站点域名，埋点请求默认不带凭据。</p>
 		  <div className="type-chips guide-mode-chips">
 			<button type="button" className={`chip ${guideMode === 'script' ? 'active' : ''}`} onClick={() => setGuideMode('script')}>一行引用</button>
 			<button type="button" className={`chip ${guideMode === 'inline' ? 'active' : ''}`} onClick={() => setGuideMode('inline')}>内联脚本</button>
 			<button type="button" className={`chip ${guideMode === 'manual' ? 'active' : ''}`} onClick={() => setGuideMode('manual')}>手动上报</button>
+			<button type="button" className={`chip ${guideMode === 'vue' ? 'active' : ''}`} onClick={() => setGuideMode('vue')}>Vue3接入</button>
 		  </div>
 		  <div className="confirm-actions guide-actions">
 			<button type="button" onClick={() => void handleCopyTrackingSnippet()} disabled={!trackingConfig.write_key}>
