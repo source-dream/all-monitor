@@ -864,6 +864,102 @@ function renderToastIcon(type: ToastType) {
 	return <Clock3 size={16} />
 }
 
+type ConfirmDialogProps = {
+	open: boolean
+	title: string
+	description: string
+	confirmText?: string
+	cancelText?: string
+	confirmVariant?: 'primary' | 'danger'
+	confirming?: boolean
+	onConfirm: () => void
+	onCancel: () => void
+}
+
+function ConfirmDialog({
+	open,
+	title,
+	description,
+	confirmText = '确认',
+	cancelText = '取消',
+	confirmVariant = 'primary',
+	confirming = false,
+	onConfirm,
+	onCancel,
+}: ConfirmDialogProps) {
+	if (!open) return null
+	return (
+		<div className="overlay" role="dialog" aria-modal="true">
+			<div className="confirm-card panel">
+				<h3>{title}</h3>
+				<p className="muted">{description}</p>
+				<div className="confirm-actions">
+					<button type="button" onClick={onCancel} disabled={confirming}>{cancelText}</button>
+					<button type="button" className={confirmVariant === 'danger' ? 'danger-btn' : 'primary'} onClick={onConfirm} disabled={confirming}>
+						{confirming ? '处理中...' : confirmText}
+					</button>
+				</div>
+			</div>
+		</div>
+	)
+}
+
+function ToastViewport({ toasts, onClose }: { toasts: ToastMessage[]; onClose: (id: number) => void }) {
+	if (toasts.length === 0) return null
+	return (
+		<div className="toast-stack" aria-live="polite" aria-atomic="false">
+			{toasts.map((toast) => (
+				<div key={toast.id} className={`toast ${toast.type}`} role="status">
+					<span className="toast-icon" aria-hidden="true">{renderToastIcon(toast.type)}</span>
+					<p>{toast.text}</p>
+					<button type="button" className="toast-close" onClick={() => onClose(toast.id)} aria-label="关闭通知">
+						<X size={14} />
+					</button>
+				</div>
+			))}
+		</div>
+	)
+}
+
+function useToastManager() {
+	const [toasts, setToasts] = useState<ToastMessage[]>([])
+	const toastTimersRef = useRef<Record<number, number>>({})
+
+	const removeToast = useCallback((id: number) => {
+		setToasts((prev) => prev.filter((item) => item.id !== id))
+		const timer = toastTimersRef.current[id]
+		if (typeof timer === 'number') {
+			window.clearTimeout(timer)
+			delete toastTimersRef.current[id]
+		}
+	}, [])
+
+	const pushToast = useCallback((type: ToastType, text: string, durationMS = 2200) => {
+		const id = Date.now() + Math.floor(Math.random() * 100000)
+		setToasts((prev) => [{ id, type, text }, ...prev].slice(0, 5))
+		toastTimersRef.current[id] = window.setTimeout(() => {
+			setToasts((prev) => prev.filter((item) => item.id !== id))
+			delete toastTimersRef.current[id]
+		}, Math.max(1000, durationMS))
+	}, [])
+
+	useEffect(() => {
+		return () => {
+			Object.values(toastTimersRef.current).forEach((timer) => window.clearTimeout(timer))
+			toastTimersRef.current = {}
+		}
+	}, [])
+
+	const notify: ToastNotifier = useMemo(() => ({
+		success: (text, durationMS) => pushToast('success', text, durationMS),
+		error: (text, durationMS) => pushToast('error', text, durationMS),
+		info: (text, durationMS) => pushToast('info', text, durationMS),
+		warning: (text, durationMS) => pushToast('warning', text, durationMS),
+	}), [pushToast])
+
+	return { toasts, notify, removeToast }
+}
+
 function formatBytes(val?: number): string {
 	if (!val || val <= 0) return '--'
 	const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -3854,40 +3950,30 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		</div>
 	  ) : null}
 
-	  {pendingDeleteNode ? (
-		<div className="overlay" role="dialog" aria-modal="true">
-		  <div className="confirm-card panel">
-			<h3>确认删除该节点？</h3>
-			<p className="muted">节点「{pendingDeleteNode.name || pendingDeleteNode.node_uid}」将从当前节点组移除，删除后不可恢复。</p>
-			<div className="confirm-actions">
-			  <button type="button" onClick={() => setPendingDeleteNode(null)} disabled={deletingNodeFromCard}>取消</button>
-			  <button
-				type="button"
-				className="danger-btn"
-				onClick={() => void handleDeleteNodeFromCard(pendingDeleteNode, false)}
-				disabled={deletingNodeFromCard}
-			  >
-				{deletingNodeFromCard ? '删除中...' : '确认删除'}
-			  </button>
-			</div>
-		  </div>
-		</div>
-	  ) : null}
+	  <ConfirmDialog
+		open={Boolean(pendingDeleteNode)}
+		title="确认删除该节点？"
+		description={`节点「${pendingDeleteNode?.name || pendingDeleteNode?.node_uid || ''}」将从当前节点组移除，删除后不可恢复。`}
+		confirmText="确认删除"
+		confirmVariant="danger"
+		confirming={deletingNodeFromCard}
+		onCancel={() => setPendingDeleteNode(null)}
+		onConfirm={() => {
+			if (!pendingDeleteNode) return
+			void handleDeleteNodeFromCard(pendingDeleteNode, false)
+		}}
+	  />
 
-      {confirmDelete ? (
-        <div className="overlay" role="dialog" aria-modal="true">
-          <div className="confirm-card panel">
-            <h3>确认删除该目标？</h3>
-            <p className="muted">删除后不可恢复，相关检测结果也会一并删除。</p>
-            <div className="confirm-actions">
-              <button type="button" onClick={() => setConfirmDelete(false)} disabled={deleting}>取消</button>
-              <button type="button" className="danger-btn" onClick={() => void handleDeleteTarget()} disabled={deleting}>
-                {deleting ? '删除中...' : '确认删除'}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+	  <ConfirmDialog
+		open={confirmDelete}
+		title="确认删除该目标？"
+		description="删除后不可恢复，相关检测结果也会一并删除。"
+		confirmText="确认删除"
+		confirmVariant="danger"
+		confirming={deleting}
+		onCancel={() => setConfirmDelete(false)}
+		onConfirm={() => void handleDeleteTarget()}
+	  />
     </div>
   )
 }
@@ -4082,20 +4168,16 @@ function SubscriptionNodeDetailPage({ token, notify, theme }: { token: string; n
 					</div>
 				</article>
 			</section>
-			{confirmDeleteNode ? (
-				<div className="overlay" role="dialog" aria-modal="true">
-					<div className="confirm-card panel">
-						<h3>确认删除该节点？</h3>
-						<p className="muted">仅会从当前节点组移除该节点，删除后不可恢复。</p>
-						<div className="confirm-actions">
-							<button type="button" onClick={() => setConfirmDeleteNode(false)} disabled={deletingNode}>取消</button>
-							<button type="button" className="danger-btn" onClick={() => void handleDeleteNode()} disabled={deletingNode}>
-								{deletingNode ? '删除中...' : '确认删除'}
-							</button>
-						</div>
-					</div>
-				</div>
-			) : null}
+			<ConfirmDialog
+				open={confirmDeleteNode}
+				title="确认删除该节点？"
+				description="仅会从当前节点组移除该节点，删除后不可恢复。"
+				confirmText="确认删除"
+				confirmVariant="danger"
+				confirming={deletingNode}
+				onCancel={() => setConfirmDeleteNode(false)}
+				onConfirm={() => void handleDeleteNode()}
+			/>
 		</div>
 	)
 }
@@ -4109,33 +4191,7 @@ function App() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
   })
   const [error, setError] = useState('')
-  const [toasts, setToasts] = useState<ToastMessage[]>([])
-  const toastTimersRef = useRef<Record<number, number>>({})
-
-  const removeToast = useCallback((id: number) => {
-	setToasts((prev) => prev.filter((item) => item.id !== id))
-	const timer = toastTimersRef.current[id]
-	if (typeof timer === 'number') {
-		window.clearTimeout(timer)
-		delete toastTimersRef.current[id]
-	}
-  }, [])
-
-  const pushToast = useCallback((type: ToastType, text: string, durationMS = 2200) => {
-	const id = Date.now() + Math.floor(Math.random() * 100000)
-	setToasts((prev) => [{ id, type, text }, ...prev].slice(0, 5))
-	toastTimersRef.current[id] = window.setTimeout(() => {
-		setToasts((prev) => prev.filter((item) => item.id !== id))
-		delete toastTimersRef.current[id]
-	}, Math.max(1000, durationMS))
-  }, [])
-
-  const notify: ToastNotifier = useMemo(() => ({
-	success: (text, durationMS) => pushToast('success', text, durationMS),
-	error: (text, durationMS) => pushToast('error', text, durationMS),
-	info: (text, durationMS) => pushToast('info', text, durationMS),
-	warning: (text, durationMS) => pushToast('warning', text, durationMS),
-  }), [pushToast])
+  const { toasts, notify, removeToast } = useToastManager()
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -4155,13 +4211,6 @@ function App() {
 	}
 	window.addEventListener(AUTH_EXPIRED_EVENT, onAuthExpired)
 	return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onAuthExpired)
-  }, [])
-
-  useEffect(() => {
-	return () => {
-		Object.values(toastTimersRef.current).forEach((timer) => window.clearTimeout(timer))
-		toastTimersRef.current = {}
-	}
   }, [])
 
   async function handleSetup(e: FormEvent<HTMLFormElement>) {
@@ -4249,19 +4298,7 @@ function App() {
 
   return (
     <BrowserRouter>
-      {toasts.length > 0 ? (
-		<div className="toast-stack" aria-live="polite" aria-atomic="false">
-		  {toasts.map((toast) => (
-			<div key={toast.id} className={`toast ${toast.type}`} role="status">
-			  <span className="toast-icon" aria-hidden="true">{renderToastIcon(toast.type)}</span>
-			  <p>{toast.text}</p>
-			  <button type="button" className="toast-close" onClick={() => removeToast(toast.id)} aria-label="关闭通知">
-				<X size={14} />
-			  </button>
-			</div>
-		  ))}
-		</div>
-	  ) : null}
+	  <ToastViewport toasts={toasts} onClose={removeToast} />
       <Routes>
         <Route
           path="/"
