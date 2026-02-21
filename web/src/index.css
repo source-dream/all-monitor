@@ -53,6 +53,36 @@ body {
   min-height: 100vh;
 }
 
+html.dashboard-scroll,
+body.dashboard-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text-muted) 56%, var(--border)) color-mix(in srgb, var(--bg-elevated) 86%, var(--bg));
+}
+
+html.dashboard-scroll::-webkit-scrollbar,
+body.dashboard-scroll::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+html.dashboard-scroll::-webkit-scrollbar-track,
+body.dashboard-scroll::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--bg-elevated) 90%, var(--bg));
+  border-radius: 999px;
+}
+
+html.dashboard-scroll::-webkit-scrollbar-thumb,
+body.dashboard-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  border: 2px solid color-mix(in srgb, var(--bg-elevated) 90%, var(--bg));
+  background: color-mix(in srgb, var(--text-muted) 58%, var(--border));
+}
+
+html.dashboard-scroll::-webkit-scrollbar-thumb:hover,
+body.dashboard-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text) 42%, var(--text-muted));
+}
+
 button,
 input,
 select,
@@ -110,6 +140,25 @@ textarea {
   margin: 16px auto;
   display: grid;
   gap: 14px;
+}
+
+.dashboard-workspace,
+.detail-workspace {
+  width: calc(100vw - 56px);
+  max-width: none;
+  margin: 18px auto 22px;
+}
+
+.dashboard-workspace .kpi-grid {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+}
+
+.dashboard-workspace .main-grid {
+  grid-template-columns: minmax(290px, 360px) minmax(0, 1fr);
+}
+
+.dashboard-workspace .card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
 }
 
 .workspace-header {
@@ -1191,6 +1240,10 @@ textarea {
 }
 
 @media (max-width: 1024px) {
+  .dashboard-workspace .main-grid {
+    grid-template-columns: 1fr;
+  }
+
   .main-grid {
     grid-template-columns: 1fr;
   }
@@ -1205,6 +1258,12 @@ textarea {
 }
 
 @media (max-width: 680px) {
+  .dashboard-workspace,
+  .detail-workspace {
+    width: calc(100vw - 28px);
+    margin: 10px auto 14px;
+  }
+
   .workspace {
     width: calc(100vw - 16px);
     margin: 8px auto;

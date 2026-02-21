@@ -844,6 +844,17 @@ function formatMinuteTime(date: Date | null): string {
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
 }
 
+function useWorkspaceScrollbar() {
+  useEffect(() => {
+    document.documentElement.classList.add('dashboard-scroll')
+    document.body.classList.add('dashboard-scroll')
+    return () => {
+      document.documentElement.classList.remove('dashboard-scroll')
+      document.body.classList.remove('dashboard-scroll')
+    }
+  }, [])
+}
+
 function DashboardPage({
   token,
   theme,
@@ -855,6 +866,7 @@ function DashboardPage({
   setTheme: (theme: ThemeMode) => void
   onLogout: () => void
 }) {
+  useWorkspaceScrollbar()
   const navigate = useNavigate()
   const [targets, setTargets] = useState<Target[]>([])
   const [resultMap, setResultMap] = useState<Record<number, CheckResult[]>>({})
@@ -1148,7 +1160,7 @@ function DashboardPage({
   }, [targets, search, typeFilter, onlyAbnormal, resultMap, trackingMap])
 
   return (
-    <div className="workspace">
+    <div className="workspace dashboard-workspace">
       <header className="workspace-header">
 		<div className="header-main">
           <p className="muted">源梦监控</p>
@@ -1631,6 +1643,7 @@ function DashboardPage({
 }
 
 function TargetDetailPage({ token }: { token: string }) {
+  useWorkspaceScrollbar()
   const navigate = useNavigate()
   const params = useParams()
   const id = Number(params.id)
@@ -2494,7 +2507,7 @@ function TargetDetailPage({ token }: { token: string }) {
   }
 
   return (
-    <div className="workspace">
+    <div className="workspace detail-workspace">
       <header className="workspace-header">
 		<div className="header-main">
           <button type="button" className="back-button" onClick={() => navigate('/')}>
@@ -3251,6 +3264,7 @@ function TargetDetailPage({ token }: { token: string }) {
 }
 
 function SubscriptionNodeDetailPage({ token }: { token: string }) {
+	useWorkspaceScrollbar()
 	const navigate = useNavigate()
 	const params = useParams()
 	const id = Number(params.id)
@@ -3311,7 +3325,7 @@ function SubscriptionNodeDetailPage({ token }: { token: string }) {
 	}), [series])
 
 	return (
-		<div className="workspace">
+		<div className="workspace detail-workspace">
 			<header className="workspace-header">
 				<div className="header-main">
 					<button type="button" className="back-button" onClick={() => navigate(-1)}>
