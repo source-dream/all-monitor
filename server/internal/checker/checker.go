@@ -306,6 +306,8 @@ func SelectChecker(targetType string) (Checker, error) {
 		return &PortChecker{ForceProtocol: "tcp"}, nil
 	case "subscription":
 		return &HTTPChecker{}, nil
+	case "node_group":
+		return &TrackingChecker{}, nil
 	case "ai":
 		return &AIRelayChecker{}, nil
 	case "tracking":

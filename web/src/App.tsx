@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ChangeEvent, FormEvent, InputHTMLAttributes } from 'react'
 import {
   Activity,
@@ -9,6 +9,7 @@ import {
   PauseCircle,
   Pencil,
   PlayCircle,
+  Plus,
   RefreshCcw,
   ShieldCheck,
   Trash2,
@@ -31,6 +32,20 @@ const AUTH_EXPIRED_EVENT = 'all_monitor_auth_expired'
 const DEFAULT_SUB_FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 type ThemeMode = 'light' | 'dark'
+type ToastType = 'success' | 'error' | 'info' | 'warning'
+
+type ToastMessage = {
+	id: number
+	type: ToastType
+	text: string
+}
+
+type ToastNotifier = {
+	success: (text: string, durationMS?: number) => void
+	error: (text: string, durationMS?: number) => void
+	info: (text: string, durationMS?: number) => void
+	warning: (text: string, durationMS?: number) => void
+}
 
 type Target = {
   id: number
@@ -180,6 +195,13 @@ type SubscriptionNodeSeriesPoint = {
 	error_msg: string
 }
 
+type SubscriptionSeriesPoint = {
+	bucket: string
+	available_nodes: number
+	availability: number
+	total_checks: number
+}
+
 type SubscriptionLatencyJobStatus = {
 	job_id: string
 	target_id: number
@@ -245,6 +267,7 @@ type SubscriptionConfig = {
 	probe_urls_overseas: string[]
 	singbox_path: string
 	manual_expire_at: string
+	node_uris: string[]
 }
 
 type PreferenceDefaultsPayload = {
@@ -292,6 +315,7 @@ const TYPE_OPTIONS = [
   { value: 'site', label: '站点' },
   { value: 'tracking', label: '埋点' },
   { value: 'port', label: '端口监控' },
+  { value: 'node_group', label: '节点组' },
   { value: 'subscription', label: '订阅' },
   { value: 'ai', label: 'AI中转站' },
 ]
@@ -572,6 +596,7 @@ function getTypeLabel(value: string): string {
 	if (value === 'http') return '站点'
 	if (value === 'api') return 'AI中转站'
 	if (value === 'tcp' || value === 'server' || value === 'node') return '端口监控'
+	if (value === 'nodegroup' || value === 'node-group' || value === 'nodes') return '节点组'
 	const found = TYPE_OPTIONS.find((item) => item.value === value)
 	return found?.label ?? value
 }
@@ -580,6 +605,7 @@ function normalizeType(value: string): string {
 	if (value === 'http') return 'site'
 	if (value === 'api') return 'ai'
 	if (value === 'tcp' || value === 'server' || value === 'node') return 'port'
+	if (value === 'nodegroup' || value === 'node-group' || value === 'nodes') return 'node_group'
 	return value
 }
 
@@ -684,6 +710,7 @@ function readSubscriptionConfig(configJSON?: string): SubscriptionConfig {
 		probe_urls_overseas: ['https://www.google.com/generate_204', 'https://cp.cloudflare.com/generate_204'],
 		singbox_path: 'sing-box',
 		manual_expire_at: '',
+		node_uris: [],
 	}
 	if (!configJSON) return defaults
 	try {
@@ -704,6 +731,7 @@ function readSubscriptionConfig(configJSON?: string): SubscriptionConfig {
 			probe_urls_overseas?: string[]
 			singbox_path?: string
 			manual_expire_at?: string
+			node_uris?: string[]
 		}
 		const wd = typeof parsed.weight_domestic === 'number' && parsed.weight_domestic >= 0 ? parsed.weight_domestic : defaults.weight_domestic
 		const wo = typeof parsed.weight_overseas === 'number' && parsed.weight_overseas >= 0 ? parsed.weight_overseas : defaults.weight_overseas
@@ -741,6 +769,7 @@ function readSubscriptionConfig(configJSON?: string): SubscriptionConfig {
 			probe_urls_overseas: normalizeURLs(parsed.probe_urls_overseas, defaults.probe_urls_overseas),
 			singbox_path: (parsed.singbox_path ?? '').trim() || defaults.singbox_path,
 			manual_expire_at: normalizeDateTimeLocal(parsed.manual_expire_at ?? ''),
+			node_uris: Array.isArray(parsed.node_uris) ? parsed.node_uris.map((x) => String(x ?? '').trim()).filter(Boolean) : [],
 		}
 	} catch {
 		return defaults
@@ -789,13 +818,48 @@ function AutoGrowTextarea({
 type NumberStepperInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>
 
 function NumberStepperInput(props: NumberStepperInputProps) {
-	return <input type="number" {...props} />
+	const { className, ...rest } = props
+	return <input type="number" className={className ? `number-stepper ${className}` : 'number-stepper'} {...rest} />
 }
 
 function openDateTimePicker(input: HTMLInputElement) {
 	input.focus()
 	const pickerInput = input as HTMLInputElement & { showPicker?: () => void }
 	pickerInput.showPicker?.()
+}
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+	try {
+		if (navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(text)
+			return true
+		}
+	} catch {
+		// fallback below
+	}
+
+	try {
+		const textarea = document.createElement('textarea')
+		textarea.value = text
+		textarea.setAttribute('readonly', 'true')
+		textarea.style.position = 'fixed'
+		textarea.style.opacity = '0'
+		textarea.style.pointerEvents = 'none'
+		document.body.appendChild(textarea)
+		textarea.select()
+		const copied = document.execCommand('copy')
+		document.body.removeChild(textarea)
+		return copied
+	} catch {
+		return false
+	}
+}
+
+function renderToastIcon(type: ToastType) {
+	if (type === 'success') return <ShieldCheck size={16} />
+	if (type === 'error') return <X size={16} />
+	if (type === 'warning') return <AlertTriangle size={16} />
+	return <Clock3 size={16} />
 }
 
 function formatBytes(val?: number): string {
@@ -957,11 +1021,13 @@ function DashboardPage({
   token,
   theme,
   setTheme,
+  notify,
   onLogout,
 }: {
   token: string
   theme: ThemeMode
   setTheme: (theme: ThemeMode) => void
+  notify: ToastNotifier
   onLogout: () => void
 }) {
   useWorkspaceScrollbar()
@@ -998,6 +1064,7 @@ function DashboardPage({
   const [createSubTargetIntervalSec, setCreateSubTargetIntervalSec] = useState(SUBSCRIPTION_CREATE_DEFAULTS.interval_sec)
   const [createSubTargetTimeoutMS, setCreateSubTargetTimeoutMS] = useState(SUBSCRIPTION_CREATE_DEFAULTS.timeout_ms)
   const [createSubManualExpireAt, setCreateSubManualExpireAt] = useState('')
+  const [createNodeGroupURIs, setCreateNodeGroupURIs] = useState('')
   const [createPortProtocol, setCreatePortProtocol] = useState<PortProtocol>('tcp')
   const [createUDPMode, setCreateUDPMode] = useState<UDPMode>('send_only')
   const [createUDPPayload, setCreateUDPPayload] = useState('ping')
@@ -1134,7 +1201,7 @@ function DashboardPage({
 	  )
 	  setTrackingMap(Object.fromEntries(trackingEntries))
 
-	  const subscriptionTargets = targetsData.filter((target) => target.type === 'subscription')
+	  const subscriptionTargets = targetsData.filter((target) => target.type === 'subscription' || target.type === 'node_group')
 	  const subscriptionEntries = await Promise.all(
 		subscriptionTargets.map(async (target) => {
 		  try {
@@ -1186,13 +1253,13 @@ function DashboardPage({
     const payload: CreateTargetPayload = {
       name: String(form.get('name') ?? ''),
       type: createType,
-      endpoint: createType === 'tracking' ? 'tracking://ingest' : String(form.get('endpoint') ?? ''),
-	  interval_sec: createType === 'tracking' ? 60 : (createType === 'subscription' ? createSubTargetIntervalSec : Number(form.get('interval_sec') ?? 60)),
-	  timeout_ms: createType === 'tracking' ? 5000 : (createType === 'subscription' ? createSubTargetTimeoutMS : Number(form.get('timeout_ms') ?? 5000)),
+	  endpoint: createType === 'tracking' ? 'tracking://ingest' : (createType === 'node_group' ? 'node-group://manual' : String(form.get('endpoint') ?? '')),
+	  interval_sec: createType === 'tracking' ? 60 : (createType === 'subscription' ? createSubTargetIntervalSec : (createType === 'node_group' ? 0 : Number(form.get('interval_sec') ?? 60))),
+	  timeout_ms: createType === 'tracking' ? 5000 : (createType === 'subscription' ? createSubTargetTimeoutMS : (createType === 'node_group' ? 5000 : Number(form.get('timeout_ms') ?? 5000))),
       enabled: true,
 	  config_json: createType === 'ai'
 		? JSON.stringify({ api_key: createAPIKey.trim() })
-		: (createType === 'subscription'
+		: ((createType === 'subscription' || createType === 'node_group')
 			? JSON.stringify({
 				latency_concurrency: createSubConcurrency,
 				latency_timeout_ms: createSubTimeoutMS,
@@ -1209,7 +1276,8 @@ function DashboardPage({
 				probe_urls_domestic: createSubURLsDomestic.split('\n').map((x) => x.trim()).filter(Boolean),
 				probe_urls_overseas: createSubURLsOverseas.split('\n').map((x) => x.trim()).filter(Boolean),
 				singbox_path: createSingBoxPath.trim() || 'sing-box',
-				manual_expire_at: createSubManualExpireAt.trim(),
+				manual_expire_at: createType === 'subscription' ? createSubManualExpireAt.trim() : '',
+				node_uris: createType === 'node_group' ? createNodeGroupURIs.split('\n').map((x) => x.trim()).filter(Boolean) : [],
 			})
 		: (createType === 'port'
 			? JSON.stringify({
@@ -1237,27 +1305,27 @@ function DashboardPage({
 		setError('埋点类型必须填写 write key')
 		return
 	}
-	if (createType === 'subscription' && createSubConcurrency <= 0) {
+	if ((createType === 'subscription' || createType === 'node_group') && createSubConcurrency <= 0) {
 		setError('订阅测速并发必须大于 0')
 		return
 	}
-	if (createType === 'subscription' && createSubProbeCount <= 0) {
+	if ((createType === 'subscription' || createType === 'node_group') && createSubProbeCount <= 0) {
 		setError('单节点探测次数必须大于 0')
 		return
 	}
-	if (createType === 'subscription' && createSubE2ETimeoutMS <= 0) {
+	if ((createType === 'subscription' || createType === 'node_group') && createSubE2ETimeoutMS <= 0) {
 		setError('E2E 超时必须大于 0')
 		return
 	}
-	if (createType === 'subscription' && createSubFetchTimeoutMS <= 0) {
+	if ((createType === 'subscription' || createType === 'node_group') && createSubFetchTimeoutMS <= 0) {
 		setError('订阅拉取超时必须大于 0')
 		return
 	}
-	if (createType === 'subscription' && createSubFetchRetries < 0) {
+	if ((createType === 'subscription' || createType === 'node_group') && createSubFetchRetries < 0) {
 		setError('订阅拉取重试次数不能小于 0')
 		return
 	}
-	if (createType === 'subscription' && createSubIntervalSec < 0) {
+	if ((createType === 'subscription' || createType === 'node_group') && createSubIntervalSec < 0) {
 		setError('自动测速间隔不能小于 0（0 表示不定时测速）')
 		return
 	}
@@ -1269,7 +1337,7 @@ function DashboardPage({
 		setError('超时必须大于 0')
 		return
 	}
-	if (createType === 'subscription' && (createSubWeightDomestic < 0 || createSubWeightOverseas < 0 || (createSubWeightDomestic + createSubWeightOverseas) <= 0)) {
+	if ((createType === 'subscription' || createType === 'node_group') && (createSubWeightDomestic < 0 || createSubWeightOverseas < 0 || (createSubWeightDomestic + createSubWeightOverseas) <= 0)) {
 		setError('国内/海外权重需大于等于0且总和大于0')
 		return
 	}
@@ -1277,7 +1345,7 @@ function DashboardPage({
 		setError('UDP 校验回包模式下请填写期望回包')
 		return
 	}
-	if (createType !== 'tracking' && !String(form.get('endpoint') ?? '').trim()) {
+	if (createType !== 'tracking' && createType !== 'node_group' && !String(form.get('endpoint') ?? '').trim()) {
 		setError('该类型必须填写地址')
 		return
 	}
@@ -1423,7 +1491,7 @@ function DashboardPage({
                 ))}
               </div>
             </label>
-			{createType !== 'tracking' ? (
+			{createType !== 'tracking' && createType !== 'node_group' ? (
 			  <label>
 				地址
 				<input name="endpoint" placeholder={createType === 'port' ? '127.0.0.1:6379' : 'https://example.com/health 或 1.2.3.4:443'} required />
@@ -1473,8 +1541,14 @@ function DashboardPage({
 				/>
 			  </label>
 			) : null}
-			{createType === 'subscription' ? (
+			{createType === 'subscription' || createType === 'node_group' ? (
 			  <>
+			  {createType === 'node_group' ? (
+				<label>
+				  节点 URI 列表（每行一个，可选）
+				  <AutoGrowTextarea value={createNodeGroupURIs} onChange={(e) => setCreateNodeGroupURIs(e.target.value)} rows={5} placeholder="vmess://...\nvless://..." />
+				</label>
+			  ) : null}
 			  <div className="form-row">
 				<label>
 				  测速并发（大于等于1）
@@ -1488,14 +1562,18 @@ function DashboardPage({
 				  E2E超时(ms)
 				  <NumberStepperInput min={500} value={createSubE2ETimeoutMS} onChange={(e) => setCreateSubE2ETimeoutMS(Number(e.target.value) || 6000)} required />
 				</label>
-				<label>
-				  订阅拉取超时(ms)
-				  <NumberStepperInput min={1000} value={createSubFetchTimeoutMS} onChange={(e) => setCreateSubFetchTimeoutMS(Number(e.target.value) || 20000)} required />
-				</label>
-				<label>
-				  拉取重试次数
-				  <NumberStepperInput min={0} max={5} value={createSubFetchRetries} onChange={(e) => setCreateSubFetchRetries(Math.max(0, Math.min(5, Number(e.target.value) || 0)))} required />
-				</label>
+				{createType === 'subscription' ? (
+				  <>
+					<label>
+					  订阅拉取超时(ms)
+					  <NumberStepperInput min={1000} value={createSubFetchTimeoutMS} onChange={(e) => setCreateSubFetchTimeoutMS(Number(e.target.value) || 20000)} required />
+					</label>
+					<label>
+					  拉取重试次数
+					  <NumberStepperInput min={0} max={5} value={createSubFetchRetries} onChange={(e) => setCreateSubFetchRetries(Math.max(0, Math.min(5, Number(e.target.value) || 0)))} required />
+					</label>
+				  </>
+				) : null}
 				<label>
 				  单节点探测次数
 				  <NumberStepperInput min={1} value={createSubProbeCount} onChange={(e) => setCreateSubProbeCount(Number(e.target.value) || 3)} required />
@@ -1533,28 +1611,32 @@ function DashboardPage({
 				sing-box 路径
 				<input value={createSingBoxPath} onChange={(e) => setCreateSingBoxPath(e.target.value)} placeholder="sing-box" />
 			  </label>
-			  <label>
-				订阅拉取代理（可选）
-				<input value={createSubFetchProxyURL} onChange={(e) => setCreateSubFetchProxyURL(e.target.value)} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />
-			  </label>
-			  <label>
-				订阅拉取 UA
-				<input value={createSubFetchUA} onChange={(e) => setCreateSubFetchUA(e.target.value)} placeholder={DEFAULT_SUB_FETCH_UA} />
-			  </label>
-			  <label>
-				订阅拉取 Cookie（可选）
-				<AutoGrowTextarea value={createSubFetchCookie} onChange={(e) => setCreateSubFetchCookie(e.target.value)} rows={2} />
-			  </label>
-			  <label>
-				手动到期时间（可选）
-				<input
-					type="datetime-local"
-					value={createSubManualExpireAt}
-					onChange={(e) => setCreateSubManualExpireAt(e.target.value)}
-					onClick={(e) => openDateTimePicker(e.currentTarget)}
-					onFocus={(e) => openDateTimePicker(e.currentTarget)}
-				/>
-			  </label>
+			  {createType === 'subscription' ? (
+				<>
+				  <label>
+					订阅拉取代理（可选）
+					<input value={createSubFetchProxyURL} onChange={(e) => setCreateSubFetchProxyURL(e.target.value)} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />
+				  </label>
+				  <label>
+					订阅拉取 UA
+					<input value={createSubFetchUA} onChange={(e) => setCreateSubFetchUA(e.target.value)} placeholder={DEFAULT_SUB_FETCH_UA} />
+				  </label>
+				  <label>
+					订阅拉取 Cookie（可选）
+					<AutoGrowTextarea value={createSubFetchCookie} onChange={(e) => setCreateSubFetchCookie(e.target.value)} rows={2} />
+				  </label>
+				  <label>
+					手动到期时间（可选）
+					<input
+						type="datetime-local"
+						value={createSubManualExpireAt}
+						onChange={(e) => setCreateSubManualExpireAt(e.target.value)}
+						onClick={(e) => openDateTimePicker(e.currentTarget)}
+						onFocus={(e) => openDateTimePicker(e.currentTarget)}
+					/>
+				  </label>
+				</>
+			  ) : null}
 			  </>
 			) : null}
 			{createType === 'tracking' ? (
@@ -1620,11 +1702,11 @@ function DashboardPage({
 				</label>
 			  </>
 			) : null}
-			{createType !== 'tracking' ? (
+			{createType !== 'tracking' && createType !== 'node_group' ? (
 			  <div className="form-row">
 				<label>
-				  {createType === 'subscription' ? '订阅拉取间隔(秒，0=不定时)' : '间隔(秒)'}
-				  {createType === 'subscription' ? (
+			  {createType === 'subscription' ? '订阅拉取间隔(秒，0=不定时)' : '间隔(秒)'}
+			  {createType === 'subscription' ? (
 					<NumberStepperInput
 						min={0}
 						value={createSubTargetIntervalSec}
@@ -1640,7 +1722,7 @@ function DashboardPage({
 				</label>
 				<label>
 				  超时(ms)
-				  {createType === 'subscription' ? (
+			  {createType === 'subscription' ? (
 					<NumberStepperInput
 						min={200}
 						value={createSubTargetTimeoutMS}
@@ -1668,7 +1750,7 @@ function DashboardPage({
 			const finance = financeMap[target.id]
 			const tracking = trackingMap[target.id]
 			const subscription = subscriptionMap[target.id]
-			const subscriptionConfig = target.type === 'subscription' ? readSubscriptionConfig(target.config_json) : null
+			const subscriptionConfig = (target.type === 'subscription' || target.type === 'node_group') ? readSubscriptionConfig(target.config_json) : null
 			const cardExpireAt = subscription?.expire_at || subscriptionConfig?.manual_expire_at || ''
 			const trackingStatus = target.type === 'tracking' ? getTrackingStatusInfo(target, tracking) : null
 			const latest = rows[0]
@@ -1694,19 +1776,29 @@ function DashboardPage({
 				<div className="card-head">
 				  <div className="card-head-main">
 					<h3>{target.name}</h3>
-					{target.type !== 'tracking' ? (
-					  <a
+					{target.type !== 'tracking' && target.type !== 'node_group' ? (
+					  <>
+						<a
 						className="endpoint-link"
 						href={toVisitURL(target.endpoint)}
 						target="_blank"
 						rel="noreferrer"
 						onClick={(event) => event.stopPropagation()}
-						title="打开目标地址"
-					  >
-						{target.endpoint}
-					  </a>
+						onContextMenu={(event) => {
+							event.preventDefault()
+							event.stopPropagation()
+							void copyTextToClipboard(target.endpoint).then((ok) => {
+								if (ok) notify.success('地址已复制')
+								else notify.error('复制失败')
+							})
+						  }}
+						title="左键打开，右键复制地址"
+						>
+						  {target.endpoint}
+						</a>
+					  </>
 					) : (
-					  <p className="muted">被动上报</p>
+					  <p className="muted">{target.type === 'node_group' ? '手动节点列表' : '被动上报'}</p>
 					)}
                   </div>
                   <div className="card-head-actions">
@@ -1769,20 +1861,35 @@ function DashboardPage({
 					  <strong>{tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '--'}</strong>
 					</div>
 				  </div>
-				) : target.type === 'subscription' ? (
+				) : (target.type === 'subscription' || target.type === 'node_group') ? (
 				  <div className="metrics">
 					<div>
 					  <p className="muted">节点状态</p>
 					  <strong>{subscription?.has_data ? `${subscription.available_total ?? 0}/${subscription.node_total ?? 0}` : '--'}</strong>
 					</div>
-					<div>
-					  <p className="muted">剩余流量</p>
-					  <strong>{subscription?.has_data ? formatBytes(subscription.remaining_bytes) : '--'}</strong>
-					</div>
-					<div>
-					  <p className="muted">到期时间</p>
-					  <strong>{cardExpireAt ? formatDateTime(cardExpireAt) : '--'}</strong>
-					</div>
+					{target.type === 'subscription' ? (
+					  <>
+						<div>
+						  <p className="muted">剩余流量</p>
+						  <strong>{subscription?.has_data ? formatBytes(subscription.remaining_bytes) : '--'}</strong>
+						</div>
+						<div>
+						  <p className="muted">到期时间</p>
+						  <strong>{cardExpireAt ? formatDateTime(cardExpireAt) : '--'}</strong>
+						</div>
+					  </>
+					) : (
+					  <>
+						<div>
+						  <p className="muted">平均延迟</p>
+						  <strong>{subscription?.latency_ms ? `${subscription.latency_ms}ms` : '--'}</strong>
+						</div>
+						<div>
+						  <p className="muted">测速状态</p>
+						  <strong>{subscription?.reachable ? '可用' : (subscription?.error_msg || '待检测')}</strong>
+						</div>
+					  </>
+					)}
 				  </div>
 				) : (
 				  <div className="metrics">
@@ -1814,7 +1921,7 @@ function DashboardPage({
 				  </div>
 				) : null}
 
-				{target.type !== 'tracking' && target.type !== 'subscription' ? (
+				{target.type !== 'tracking' && target.type !== 'subscription' && target.type !== 'node_group' ? (
 				<div className="uptime-wrap">
 				  <p className="muted">全天在线情况</p>
 				  <div className="uptime-bar" aria-label="全天在线状态条">
@@ -1837,8 +1944,8 @@ function DashboardPage({
 				  <span className="muted">
 					{target.type === 'tracking'
 					  ? `最后上报：${tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '暂无'}`
-					  : (target.type === 'subscription'
-						  ? `最近拉取：${subscription?.last_checked_at ? formatAgo(subscription.last_checked_at) : '暂无'}`
+					  : ((target.type === 'subscription' || target.type === 'node_group')
+						  ? `${target.type === 'node_group' ? '最近测速' : '最近拉取'}：${subscription?.last_checked_at ? formatAgo(subscription.last_checked_at) : '暂无'}`
 						  : `最后检测：${latest ? formatAgo(latest.checked_at) : '暂无'}`)}
 				  </span>
 				  {target.type !== 'tracking' ? <span className="muted">下次检测：{nextRunText}</span> : null}
@@ -1867,6 +1974,7 @@ function TargetDetailPage({ token }: { token: string }) {
   const [trackingSeries, setTrackingSeries] = useState<TrackingSeriesPoint[]>([])
   const [subscriptionSummary, setSubscriptionSummary] = useState<SubscriptionSummary | null>(null)
   const [subscriptionNodes, setSubscriptionNodes] = useState<SubscriptionNode[]>([])
+  const [subscriptionSeries, setSubscriptionSeries] = useState<SubscriptionSeriesPoint[]>([])
   const [subscriptionSort, setSubscriptionSort] = useState<'source' | 'latency' | 'name'>('source')
   const [subscriptionSearch, setSubscriptionSearch] = useState('')
   const [refreshingLatency, setRefreshingLatency] = useState(false)
@@ -1880,6 +1988,9 @@ function TargetDetailPage({ token }: { token: string }) {
   const [onlyAbnormal, setOnlyAbnormal] = useState(false)
   const [logSearch, setLogSearch] = useState('')
   const [visibleLogs, setVisibleLogs] = useState(10)
+  const [showAddNodeModal, setShowAddNodeModal] = useState(false)
+  const [nodeImportText, setNodeImportText] = useState('')
+  const [importingNodes, setImportingNodes] = useState(false)
   const [rangePreset, setRangePreset] = useState<'1h' | '6h' | '12h' | '24h' | 'custom'>('24h')
   const [customStart, setCustomStart] = useState<Date | null>(new Date(Date.now() - 24 * 60 * 60 * 1000))
   const [customEnd, setCustomEnd] = useState<Date | null>(new Date())
@@ -1939,6 +2050,7 @@ function TargetDetailPage({ token }: { token: string }) {
 	probe_urls_overseas_text: 'https://www.google.com/generate_204\nhttps://cp.cloudflare.com/generate_204',
 	singbox_path: 'sing-box',
 	manual_expire_at: '',
+	node_uris_text: '',
   })
 
   async function loadDetail() {
@@ -1951,7 +2063,8 @@ function TargetDetailPage({ token }: { token: string }) {
         api<CheckResult[]>(`/api/targets/${id}/results?limit=240`, undefined, token),
       ])
       setTarget(targetData)
-      setEditForm({
+	  const subCfg = readSubscriptionConfig(targetData.config_json)
+	  setEditForm({
         name: targetData.name,
 		type: normalizeType(targetData.type),
         endpoint: targetData.endpoint,
@@ -1961,11 +2074,12 @@ function TargetDetailPage({ token }: { token: string }) {
         api_key: readAPIKey(targetData.config_json),
 		...readTrackingConfig(targetData.config_json),
 		...readPortConfig(targetData.config_json),
-		...readSubscriptionConfig(targetData.config_json),
-		probe_urls_domestic_text: readSubscriptionConfig(targetData.config_json).probe_urls_domestic.join('\n'),
-		probe_urls_overseas_text: readSubscriptionConfig(targetData.config_json).probe_urls_overseas.join('\n'),
-		singbox_path: readSubscriptionConfig(targetData.config_json).singbox_path,
-		manual_expire_at: readSubscriptionConfig(targetData.config_json).manual_expire_at,
+		...subCfg,
+		probe_urls_domestic_text: subCfg.probe_urls_domestic.join('\n'),
+		probe_urls_overseas_text: subCfg.probe_urls_overseas.join('\n'),
+		singbox_path: subCfg.singbox_path,
+		manual_expire_at: subCfg.manual_expire_at,
+		node_uris_text: subCfg.node_uris.join('\n'),
 	  })
       setResults(rows)
 	  if (targetData.type === 'ai' || targetData.type === 'api') {
@@ -1976,6 +2090,7 @@ function TargetDetailPage({ token }: { token: string }) {
 		setTrackingSeries([])
 		setSubscriptionSummary(null)
 		setSubscriptionNodes([])
+		setSubscriptionSeries([])
 	  } else if (targetData.type === 'tracking') {
 		const [summary, events, series] = await Promise.all([
 			api<TrackingSummary>(`/api/targets/${id}/tracking/summary?hours=24`, undefined, token).catch((err) => {
@@ -1997,7 +2112,8 @@ function TargetDetailPage({ token }: { token: string }) {
 		setFinance(null)
 		setSubscriptionSummary(null)
 		setSubscriptionNodes([])
-	  } else if (targetData.type === 'subscription') {
+		setSubscriptionSeries([])
+	  } else if (targetData.type === 'subscription' || targetData.type === 'node_group') {
 		const [summary, nodes] = await Promise.all([
 			api<SubscriptionSummary>(`/api/targets/${id}/subscription/summary`, undefined, token),
 			api<SubscriptionNode[]>(`/api/targets/${id}/subscription/nodes?sort=${subscriptionSort}&search=${encodeURIComponent(subscriptionSearch)}`, undefined, token),
@@ -2008,6 +2124,7 @@ function TargetDetailPage({ token }: { token: string }) {
 		setTrackingSummary(null)
 		setTrackingEvents([])
 		setTrackingSeries([])
+		setSubscriptionSeries([])
 	  } else {
 		setFinance(null)
 		setTrackingSummary(null)
@@ -2015,6 +2132,7 @@ function TargetDetailPage({ token }: { token: string }) {
 		setTrackingSeries([])
 		setSubscriptionSummary(null)
 		setSubscriptionNodes([])
+		setSubscriptionSeries([])
 	  }
     } catch (err) {
       setError((err as Error).message)
@@ -2064,12 +2182,18 @@ function TargetDetailPage({ token }: { token: string }) {
 
   useEffect(() => {
 	if (!Number.isFinite(id) || id <= 0) return
-	if (target?.type !== 'subscription') return
+	if (target?.type !== 'subscription' && target?.type !== 'node_group') return
 	setRefreshingLatency(false)
 	setRefreshingNodeMap({})
 	setLatencyJobProgress(null)
 	void loadSubscriptionNodes().catch((err) => setError((err as Error).message))
   }, [id, target?.type, subscriptionSort, subscriptionSearch, token])
+
+  useEffect(() => {
+	if (!Number.isFinite(id) || id <= 0) return
+	if (target?.type !== 'subscription' && target?.type !== 'node_group') return
+	void loadSubscriptionSeries().catch((err) => setError((err as Error).message))
+  }, [id, target?.type, token, rangePreset, customStart, customEnd])
 
   useEffect(() => {
 	if (subscriptionNodes.length <= NODE_VIRTUAL_THRESHOLD) {
@@ -2119,27 +2243,27 @@ function TargetDetailPage({ token }: { token: string }) {
 		setError('埋点类型必须填写 write key')
 		return
 	}
-	if (editForm.type === 'subscription' && editForm.latency_concurrency <= 0) {
+	if ((editForm.type === 'subscription' || editForm.type === 'node_group') && editForm.latency_concurrency <= 0) {
 		setError('订阅测速并发必须大于 0')
 		return
 	}
-	if (editForm.type === 'subscription' && editForm.latency_probe_count <= 0) {
+	if ((editForm.type === 'subscription' || editForm.type === 'node_group') && editForm.latency_probe_count <= 0) {
 		setError('单节点探测次数必须大于 0')
 		return
 	}
-	if (editForm.type === 'subscription' && editForm.e2e_timeout_ms <= 0) {
+	if ((editForm.type === 'subscription' || editForm.type === 'node_group') && editForm.e2e_timeout_ms <= 0) {
 		setError('E2E 超时必须大于 0')
 		return
 	}
-	if (editForm.type === 'subscription' && editForm.fetch_timeout_ms <= 0) {
+	if ((editForm.type === 'subscription' || editForm.type === 'node_group') && editForm.fetch_timeout_ms <= 0) {
 		setError('订阅拉取超时必须大于 0')
 		return
 	}
-	if (editForm.type === 'subscription' && editForm.fetch_retries < 0) {
+	if ((editForm.type === 'subscription' || editForm.type === 'node_group') && editForm.fetch_retries < 0) {
 		setError('订阅拉取重试次数不能小于 0')
 		return
 	}
-	if (editForm.type === 'subscription' && editForm.latency_interval_sec < 0) {
+	if ((editForm.type === 'subscription' || editForm.type === 'node_group') && editForm.latency_interval_sec < 0) {
 		setError('自动测速间隔不能小于 0（0 表示不定时测速）')
 		return
 	}
@@ -2147,7 +2271,7 @@ function TargetDetailPage({ token }: { token: string }) {
 		setError('订阅拉取间隔不能小于 0（0 表示不定时拉取）')
 		return
 	}
-	if (editForm.type === 'subscription' && (editForm.weight_domestic < 0 || editForm.weight_overseas < 0 || (editForm.weight_domestic + editForm.weight_overseas) <= 0)) {
+	if ((editForm.type === 'subscription' || editForm.type === 'node_group') && (editForm.weight_domestic < 0 || editForm.weight_overseas < 0 || (editForm.weight_domestic + editForm.weight_overseas) <= 0)) {
 		setError('国内/海外权重需大于等于0且总和大于0')
 		return
 	}
@@ -2161,12 +2285,12 @@ function TargetDetailPage({ token }: { token: string }) {
 	  const payload = {
 		...editForm,
 		type: normalizedType,
-		endpoint: normalizedType === 'tracking' ? 'tracking://ingest' : editForm.endpoint,
-		interval_sec: normalizedType === 'tracking' ? 60 : editForm.interval_sec,
-		timeout_ms: normalizedType === 'tracking' ? 5000 : editForm.timeout_ms,
+		endpoint: normalizedType === 'tracking' ? 'tracking://ingest' : (normalizedType === 'node_group' ? 'node-group://manual' : editForm.endpoint),
+		interval_sec: normalizedType === 'tracking' ? 60 : (normalizedType === 'node_group' ? 0 : editForm.interval_sec),
+		timeout_ms: normalizedType === 'tracking' ? 5000 : (normalizedType === 'node_group' ? 5000 : editForm.timeout_ms),
 		config_json: normalizedType === 'ai'
 		  ? JSON.stringify({ api_key: editForm.api_key.trim() })
-		  : (normalizedType === 'subscription'
+		  : ((normalizedType === 'subscription' || normalizedType === 'node_group')
 			  ? JSON.stringify({
 				  latency_concurrency: editForm.latency_concurrency,
 				  latency_timeout_ms: editForm.latency_timeout_ms,
@@ -2183,7 +2307,8 @@ function TargetDetailPage({ token }: { token: string }) {
 				  probe_urls_domestic: editForm.probe_urls_domestic_text.split('\n').map((x) => x.trim()).filter(Boolean),
 				  probe_urls_overseas: editForm.probe_urls_overseas_text.split('\n').map((x) => x.trim()).filter(Boolean),
 				  singbox_path: editForm.singbox_path.trim() || 'sing-box',
-				  manual_expire_at: editForm.manual_expire_at.trim(),
+				  manual_expire_at: normalizedType === 'subscription' ? editForm.manual_expire_at.trim() : '',
+				  node_uris: normalizedType === 'node_group' ? editForm.node_uris_text.split('\n').map((x) => x.trim()).filter(Boolean) : [],
 			  })
 			  : (normalizedType === 'port'
 			  ? JSON.stringify({
@@ -2294,7 +2419,7 @@ function TargetDetailPage({ token }: { token: string }) {
   }, [windowedTrackingEvents, rangePreset, trackingSeries])
 
   const isTrackingTarget = target?.type === 'tracking'
-  const isSubscriptionTarget = target?.type === 'subscription'
+  const isSubscriptionTarget = target?.type === 'subscription' || target?.type === 'node_group'
   const trackingConfig = useMemo(() => readTrackingConfig(target?.config_json), [target?.config_json])
   const subscriptionConfig = useMemo(() => readSubscriptionConfig(target?.config_json), [target?.config_json])
   const detailLastRunAt = isTrackingTarget
@@ -2336,11 +2461,34 @@ function TargetDetailPage({ token }: { token: string }) {
 		return count
 	}, 0)
   }, [subscriptionNodes])
+  const isNodeGroupTarget = target?.type === 'node_group'
+  const nodeGroupSeriesChart = useMemo(() => {
+	const times = subscriptionSeries.map((item) => new Date(item.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
+	return {
+		times,
+		availableNodes: subscriptionSeries.map((item) => item.available_nodes ?? 0),
+		availability: subscriptionSeries.map((item) => item.availability ?? 0),
+	}
+  }, [subscriptionSeries])
+  const nodeGroupTotal = subscriptionSummary?.node_total ?? subscriptionNodes.length
+  const nodeGroupAvailability = nodeGroupTotal > 0 ? (availableSubscriptionCount / nodeGroupTotal) * 100 : 0
 
   async function loadSubscriptionNodes() {
 	if (!Number.isFinite(id) || id <= 0) return
 	const rows = await api<SubscriptionNode[]>(`/api/targets/${id}/subscription/nodes?sort=${subscriptionSort}&search=${encodeURIComponent(subscriptionSearch)}`, undefined, token)
 	setSubscriptionNodes(rows)
+  }
+
+  async function loadSubscriptionSeries() {
+	if (!Number.isFinite(id) || id <= 0) return
+	if (rangeInvalid) {
+		setSubscriptionSeries([])
+		return
+	}
+	const startISO = new Date(rangeWindow.startTs).toISOString()
+	const endISO = new Date(rangeWindow.endTs).toISOString()
+	const rows = await api<SubscriptionSeriesPoint[]>(`/api/targets/${id}/subscription/series?start=${encodeURIComponent(startISO)}&end=${encodeURIComponent(endISO)}`, undefined, token)
+	setSubscriptionSeries(rows)
   }
 
 	function applySubscriptionNodeResult(node?: SubscriptionLatencyJobNode) {
@@ -2449,6 +2597,7 @@ function TargetDetailPage({ token }: { token: string }) {
 	  }
 	  await Promise.all([
 		loadSubscriptionNodes(),
+		loadSubscriptionSeries(),
 		api<SubscriptionSummary>(`/api/targets/${id}/subscription/summary`, undefined, token).then(setSubscriptionSummary),
 	  ])
 	} catch (err) {
@@ -2457,6 +2606,40 @@ function TargetDetailPage({ token }: { token: string }) {
 	  setRefreshingNodeMap({})
 	  setLatencyJobProgress(null)
 	  setRefreshingLatency(false)
+	}
+  }
+
+  async function handleImportNodeGroupURIs() {
+	if (!target || target.type !== 'node_group') return
+	const existing = subscriptionConfig.node_uris ?? []
+	const incoming = nodeImportText.split('\n').map((x) => x.trim()).filter(Boolean)
+	const merged = Array.from(new Set([...existing, ...incoming]))
+	setImportingNodes(true)
+	setError('')
+	try {
+		const nextConfig = {
+			...subscriptionConfig,
+			node_uris: merged,
+			manual_expire_at: '',
+		}
+		await api(`/api/targets/${id}`, {
+			method: 'PUT',
+			body: JSON.stringify({
+				name: target.name,
+				type: 'node_group',
+				endpoint: target.endpoint || 'node-group://manual',
+				interval_sec: 0,
+				timeout_ms: 5000,
+				enabled: target.enabled,
+				config_json: JSON.stringify(nextConfig),
+			}),
+		}, token)
+		setShowAddNodeModal(false)
+		await loadDetail()
+	} catch (err) {
+		setError((err as Error).message)
+	} finally {
+		setImportingNodes(false)
 	}
   }
 
@@ -2522,6 +2705,9 @@ function TargetDetailPage({ token }: { token: string }) {
 		if (isTrackingTarget) {
 			return `${first.axisValueLabel}<br/>PV: ${first.data ?? 0}`
 		}
+		if (isNodeGroupTarget) {
+			return `${first.axisValueLabel}<br/>可用节点数: ${first.data ?? 0}`
+		}
         const row = chartSeries.rows[first.dataIndex]
         if (!row) return first.axisValueLabel
         const status = row.success ? '在线' : '异常'
@@ -2532,30 +2718,30 @@ function TargetDetailPage({ token }: { token: string }) {
     grid: { left: 40, right: 16, top: 20, bottom: 28 },
     xAxis: {
       type: 'category',
-      data: isTrackingTarget ? trackingChart.times : chartSeries.times,
+		data: isTrackingTarget ? trackingChart.times : (isNodeGroupTarget ? nodeGroupSeriesChart.times : chartSeries.times),
       axisLabel: { color: '#94a3b8', fontSize: 11 },
       axisLine: { lineStyle: { color: '#334155' } },
     },
     yAxis: {
       type: 'value',
-      name: isTrackingTarget ? 'count' : 'ms',
+		name: isTrackingTarget ? 'count' : (isNodeGroupTarget ? 'nodes' : 'ms'),
       nameTextStyle: { color: '#94a3b8' },
       axisLabel: { color: '#94a3b8' },
       splitLine: { lineStyle: { color: 'rgba(100,116,139,0.2)' } },
     },
     series: [
       {
-        name: isTrackingTarget ? 'PV' : '延迟',
+		name: isTrackingTarget ? 'PV' : (isNodeGroupTarget ? '可用节点数' : '延迟'),
         type: 'line',
         smooth: true,
         showSymbol: false,
-        data: isTrackingTarget ? trackingChart.pv : chartSeries.latency,
+		data: isTrackingTarget ? trackingChart.pv : (isNodeGroupTarget ? nodeGroupSeriesChart.availableNodes : chartSeries.latency),
         lineStyle: { color: '#3b82f6', width: 2 },
         itemStyle: { color: '#3b82f6' },
         areaStyle: { color: 'rgba(59,130,246,0.15)' },
       },
     ],
-  }), [chartSeries, isTrackingTarget, trackingChart])
+	}), [chartSeries, isTrackingTarget, isNodeGroupTarget, nodeGroupSeriesChart, trackingChart])
 
   const availabilityOption = useMemo(() => ({
     tooltip: {
@@ -2570,6 +2756,9 @@ function TargetDetailPage({ token }: { token: string }) {
 		if (isTrackingTarget) {
 			return `${first.axisValueLabel}<br/>UV: ${first.data}`
 		}
+		if (isNodeGroupTarget) {
+			return `${first.axisValueLabel}<br/>可用性: ${Number(first.data ?? 0).toFixed(1)}%`
+		}
         const row = chartSeries.rows[first.dataIndex]
         const status = row?.success ? '在线' : row ? '异常' : '未知'
         return `${first.axisValueLabel}<br/>可用率: ${first.data}%<br/>状态: ${status}`
@@ -2578,14 +2767,14 @@ function TargetDetailPage({ token }: { token: string }) {
     grid: { left: 40, right: 16, top: 20, bottom: 28 },
     xAxis: {
       type: 'category',
-      data: isTrackingTarget ? trackingChart.times : chartSeries.times,
+		data: isTrackingTarget ? trackingChart.times : (isNodeGroupTarget ? nodeGroupSeriesChart.times : chartSeries.times),
       axisLabel: { color: '#94a3b8', fontSize: 11 },
       axisLine: { lineStyle: { color: '#334155' } },
     },
     yAxis: {
       type: 'value',
       min: 0,
-      max: isTrackingTarget ? undefined : 100,
+		max: isTrackingTarget ? undefined : 100,
       name: isTrackingTarget ? 'count' : '%',
       nameTextStyle: { color: '#94a3b8' },
       axisLabel: { color: '#94a3b8' },
@@ -2593,17 +2782,17 @@ function TargetDetailPage({ token }: { token: string }) {
     },
     series: [
       {
-        name: isTrackingTarget ? 'UV' : '可用率',
+		name: isTrackingTarget ? 'UV' : (isNodeGroupTarget ? '可用性' : '可用率'),
         type: 'line',
         smooth: true,
         showSymbol: false,
-        data: isTrackingTarget ? trackingChart.uv : chartSeries.availability,
+		data: isTrackingTarget ? trackingChart.uv : (isNodeGroupTarget ? nodeGroupSeriesChart.availability : chartSeries.availability),
         lineStyle: { color: '#22c55e', width: 2 },
         itemStyle: { color: '#22c55e' },
         areaStyle: { color: 'rgba(34,197,94,0.12)' },
       },
     ],
-  }), [chartSeries, isTrackingTarget, trackingChart])
+	}), [chartSeries, isTrackingTarget, isNodeGroupTarget, nodeGroupSeriesChart, trackingChart])
 
   const filteredLogs = useMemo(() => {
     return windowedResults
@@ -2729,7 +2918,7 @@ function TargetDetailPage({ token }: { token: string }) {
             <ArrowLeft size={16} /> 返回
           </button>
           <h1 className="detail-title">{target?.name ?? '目标详情'}</h1>
-          {target && target.type !== 'tracking' ? (
+		  {target && target.type !== 'tracking' && target.type !== 'node_group' ? (
             <a
               className="endpoint-link"
               href={toVisitURL(target.endpoint)}
@@ -2739,9 +2928,9 @@ function TargetDetailPage({ token }: { token: string }) {
             >
               {target.endpoint}
             </a>
-          ) : target ? (
-            <p className="muted">被动上报（通过 write key 接入）</p>
-          ) : (
+		  ) : target ? (
+			<p className="muted">{target.type === 'node_group' ? '手动节点列表（可在节点列表中添加）' : '被动上报（通过 write key 接入）'}</p>
+		  ) : (
             <p className="muted">加载中...</p>
           )}
         </div>
@@ -2766,22 +2955,22 @@ function TargetDetailPage({ token }: { token: string }) {
       {error ? <p className="error panel">{error}</p> : null}
 
       <section className="kpi-grid">
-		<article className="panel metric-card">
+	  <article className="panel metric-card">
 		  <p className="panel-title"><ShieldCheck size={15} /> {isTrackingTarget ? '窗口PV' : (isSubscriptionTarget ? '节点状态' : '窗口可用率')}</p>
 		  <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.reduce((sum, item) => sum + item.count, 0)) : (isSubscriptionTarget ? `${availableSubscriptionCount}/${subscriptionSummary?.node_total ?? subscriptionNodes.length}` : `${uptime.toFixed(1)}%`))}</p>
 		</article>
         <article className="panel metric-card">
-          <p className="panel-title"><Gauge size={15} /> {isTrackingTarget ? '窗口UV' : (isSubscriptionTarget ? '剩余流量' : '平均延迟')}</p>
-          <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(new Set(windowedTrackingEvents.map((item) => item.uv_key).filter(Boolean)).size) : (isSubscriptionTarget ? formatBytes(subscriptionSummary?.remaining_bytes) : (avgLatency > 0 ? `${avgLatency}ms` : '--')))}</p>
+		  <p className="panel-title"><Gauge size={15} /> {isTrackingTarget ? '窗口UV' : (isSubscriptionTarget ? (isNodeGroupTarget ? '可用节点数' : '剩余流量') : '平均延迟')}</p>
+		  <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(new Set(windowedTrackingEvents.map((item) => item.uv_key).filter(Boolean)).size) : (isSubscriptionTarget ? (isNodeGroupTarget ? `${availableSubscriptionCount}` : formatBytes(subscriptionSummary?.remaining_bytes)) : (avgLatency > 0 ? `${avgLatency}ms` : '--')))}</p>
         </article>
         <article className="panel metric-card">
-          <p className="panel-title"><AlertTriangle size={15} /> {isTrackingTarget ? '事件条数' : (isSubscriptionTarget ? '订阅状态' : '失败次数')}</p>
-          <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.length) : (isSubscriptionTarget ? (subscriptionSummary?.reachable ? '可访问' : (subscriptionSummary?.error_msg || '异常')) : String(failureRows.length)))}</p>
+		  <p className="panel-title"><AlertTriangle size={15} /> {isTrackingTarget ? '事件条数' : (isSubscriptionTarget ? (isNodeGroupTarget ? '节点组状态' : '订阅状态') : '失败次数')}</p>
+		  <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.length) : (isSubscriptionTarget ? (subscriptionSummary?.reachable ? '可访问' : (subscriptionSummary?.error_msg || '异常')) : String(failureRows.length)))}</p>
         </article>
 		<article className="panel metric-card">
-		  <p className="panel-title"><Clock3 size={15} /> {isTrackingTarget ? '最后事件' : (isSubscriptionTarget ? '最近拉取' : '最后检测')}</p>
+		  <p className="panel-title"><Clock3 size={15} /> {isTrackingTarget ? '最后事件' : (isSubscriptionTarget ? (isNodeGroupTarget ? '最近测速' : '最近拉取') : '最后检测')}</p>
 		  <p className="panel-value">{loading ? '...' : (isTrackingTarget ? (trackingSummary?.last_event_at ? formatAgo(trackingSummary.last_event_at) : '--') : (isSubscriptionTarget ? (subscriptionSummary?.last_checked_at ? formatAgo(subscriptionSummary.last_checked_at) : '--') : (latest ? formatAgo(latest.checked_at) : '--')))}</p>
-		  {!isTrackingTarget ? <p className="muted">下次检测：{detailNextRun}</p> : null}
+		  {!isTrackingTarget ? <p className="muted">{isNodeGroupTarget ? `节点可用性：${nodeGroupAvailability.toFixed(1)}%` : `下次检测：${detailNextRun}`}</p> : null}
 		</article>
 		{target?.type === 'ai' || target?.type === 'api' ? (
 		  <>
@@ -2797,7 +2986,7 @@ function TargetDetailPage({ token }: { token: string }) {
 		) : null}
       </section>
 
-      <section className="detail-grid">
+      <section className={`detail-grid ${isNodeGroupTarget ? 'detail-grid-node-group' : ''}`}>
         <article className="panel">
           <div className="panel-head">
             <h3><Activity size={16} /> 监控趋势</h3>
@@ -2875,15 +3064,15 @@ function TargetDetailPage({ token }: { token: string }) {
           <div className="chart-grid">
             <div className="chart-panel">
               <div className="panel-head">
-                <h3>{isTrackingTarget ? 'PV趋势' : '延迟趋势'}</h3>
+				<h3>{isTrackingTarget ? 'PV趋势' : (isNodeGroupTarget ? '节点可用数趋势' : '延迟趋势')}</h3>
                 <span>按悬浮位置查看时点</span>
               </div>
               <ReactECharts option={latencyOption} style={{ height: 220 }} notMerge lazyUpdate />
             </div>
             <div className="chart-panel">
               <div className="panel-head">
-                <h3>{isTrackingTarget ? 'UV趋势' : '可用率趋势'}</h3>
-                <span>{isTrackingTarget ? '按时段去重统计' : '累计统计'}</span>
+				<h3>{isTrackingTarget ? 'UV趋势' : (isNodeGroupTarget ? '可用性趋势' : '可用率趋势')}</h3>
+				<span>{isTrackingTarget ? '按时段去重统计' : (isNodeGroupTarget ? '基于节点探测记录' : '累计统计')}</span>
               </div>
               <ReactECharts option={availabilityOption} style={{ height: 220 }} notMerge lazyUpdate />
             </div>
@@ -2891,6 +3080,7 @@ function TargetDetailPage({ token }: { token: string }) {
 
         </article>
 
+		{!isNodeGroupTarget ? (
         <article className="panel">
           <div className="panel-head">
             <h3><Clock3 size={16} /> 查询日志</h3>
@@ -2958,14 +3148,25 @@ function TargetDetailPage({ token }: { token: string }) {
             {logsToShow.length === 0 ? <p className="muted">暂无日志</p> : null}
           </div>
         </article>
+		) : null}
 
 		{isSubscriptionTarget ? (
 		  <article className="panel subscription-panel-full">
 			<div className="panel-head">
 			  <h3>节点列表</h3>
-			  <span>可用 {availableSubscriptionCount}/{subscriptionNodes.length}</span>
+			  <div className="panel-head-actions">
+				<span>可用 {availableSubscriptionCount}/{subscriptionNodes.length}</span>
+				{isNodeGroupTarget ? (
+				  <button type="button" onClick={() => {
+					setNodeImportText(subscriptionConfig.node_uris.join('\n'))
+					setShowAddNodeModal(true)
+				  }}>
+					<Plus size={14} /> 添加节点
+				  </button>
+				) : null}
+			  </div>
 			</div>
-			<div className="log-filters">
+			<div className="log-filters subscription-log-filters">
 			  <input value={subscriptionSearch} onChange={(e) => setSubscriptionSearch(e.target.value)} placeholder="搜索节点名称或地址" />
 			  <div className="type-chips">
 				<button type="button" className={`chip ${subscriptionSort === 'source' ? 'active' : ''}`} onClick={() => setSubscriptionSort('source')}>源顺序</button>
@@ -2976,7 +3177,9 @@ function TargetDetailPage({ token }: { token: string }) {
 				{refreshingLatency ? '测速中...' : '刷新测速'}
 			  </button>
 			</div>
-			<p className="muted">测速配置：并发 {subscriptionConfig.latency_concurrency}，基线超时 {subscriptionConfig.latency_timeout_ms}ms，E2E超时 {subscriptionConfig.e2e_timeout_ms}ms，拉取超时 {subscriptionConfig.fetch_timeout_ms}ms（重试 {subscriptionConfig.fetch_retries}），探测 {subscriptionConfig.latency_probe_count} 次，间隔 {subscriptionConfig.latency_interval_sec > 0 ? `${subscriptionConfig.latency_interval_sec}s` : '不定时'}，国内权重 {subscriptionConfig.weight_domestic.toFixed(2)}，海外权重 {subscriptionConfig.weight_overseas.toFixed(2)}</p>
+			<p className="muted subscription-config-note">{isNodeGroupTarget
+				? `测速配置：并发 ${subscriptionConfig.latency_concurrency}，基线超时 ${subscriptionConfig.latency_timeout_ms}ms，E2E超时 ${subscriptionConfig.e2e_timeout_ms}ms，探测 ${subscriptionConfig.latency_probe_count} 次，间隔 ${subscriptionConfig.latency_interval_sec > 0 ? `${subscriptionConfig.latency_interval_sec}s` : '不定时'}，国内权重 ${subscriptionConfig.weight_domestic.toFixed(2)}，海外权重 ${subscriptionConfig.weight_overseas.toFixed(2)}`
+				: `测速配置：并发 ${subscriptionConfig.latency_concurrency}，基线超时 ${subscriptionConfig.latency_timeout_ms}ms，E2E超时 ${subscriptionConfig.e2e_timeout_ms}ms，拉取超时 ${subscriptionConfig.fetch_timeout_ms}ms（重试 ${subscriptionConfig.fetch_retries}），探测 ${subscriptionConfig.latency_probe_count} 次，间隔 ${subscriptionConfig.latency_interval_sec > 0 ? `${subscriptionConfig.latency_interval_sec}s` : '不定时'}，国内权重 ${subscriptionConfig.weight_domestic.toFixed(2)}，海外权重 ${subscriptionConfig.weight_overseas.toFixed(2)}`}</p>
 			{refreshingLatency && latencyJobProgress ? (
 			  <div className="subscription-progress">
 				<p className="muted">测速进度：{latencyJobProgress.done}/{latencyJobProgress.total}（{latencyProgressPercent}%），成功 {latencyJobProgress.success}，失败 {latencyJobProgress.failed}</p>
@@ -3163,7 +3366,7 @@ function TargetDetailPage({ token }: { token: string }) {
                   ))}
                 </div>
               </label>
-			  {editForm.type !== 'tracking' ? (
+			  {editForm.type !== 'tracking' && editForm.type !== 'node_group' ? (
 				<label>
 				  地址
 				  <input
@@ -3185,8 +3388,14 @@ function TargetDetailPage({ token }: { token: string }) {
 				  />
 				</label>
 			  ) : null}
-			  {editForm.type === 'subscription' ? (
+			  {editForm.type === 'subscription' || editForm.type === 'node_group' ? (
 				<>
+				{editForm.type === 'node_group' ? (
+				  <label>
+					节点 URI 列表（每行一个，可选）
+					<AutoGrowTextarea value={editForm.node_uris_text} onChange={(e) => setEditForm((prev) => ({ ...prev, node_uris_text: e.target.value }))} rows={5} />
+				  </label>
+				) : null}
 				<div className="form-row">
 				  <label>
 					测速并发（大于等于1）
@@ -3215,25 +3424,29 @@ function TargetDetailPage({ token }: { token: string }) {
 					  required
 					/>
 				  </label>
-				  <label>
-					订阅拉取超时(ms)
-					<NumberStepperInput
-					  min={1000}
-					  value={editForm.fetch_timeout_ms}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_timeout_ms: Number(e.target.value) || 20000 }))}
-					  required
-					/>
-				  </label>
-				  <label>
-					拉取重试次数
-					<NumberStepperInput
-					  min={0}
-					  max={5}
-					  value={editForm.fetch_retries}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_retries: Math.max(0, Math.min(5, Number(e.target.value) || 0)) }))}
-					  required
-					/>
-				  </label>
+				  {editForm.type === 'subscription' ? (
+					<>
+					  <label>
+						订阅拉取超时(ms)
+						<NumberStepperInput
+						  min={1000}
+						  value={editForm.fetch_timeout_ms}
+						  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_timeout_ms: Number(e.target.value) || 20000 }))}
+						  required
+						/>
+					  </label>
+					  <label>
+						拉取重试次数
+						<NumberStepperInput
+						  min={0}
+						  max={5}
+						  value={editForm.fetch_retries}
+						  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_retries: Math.max(0, Math.min(5, Number(e.target.value) || 0)) }))}
+						  required
+						/>
+					  </label>
+					</>
+				  ) : null}
 				  <label>
 					单节点探测次数
 					<NumberStepperInput
@@ -3288,28 +3501,32 @@ function TargetDetailPage({ token }: { token: string }) {
 				  sing-box 路径
 				  <input value={editForm.singbox_path} onChange={(e) => setEditForm((prev) => ({ ...prev, singbox_path: e.target.value }))} placeholder="sing-box" />
 				</label>
-				<label>
-				  订阅拉取代理（可选）
-				  <input value={editForm.fetch_proxy_url} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_proxy_url: e.target.value }))} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />
-				</label>
-				<label>
-				  订阅拉取 UA
-				  <input value={editForm.fetch_user_agent} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_user_agent: e.target.value }))} placeholder={DEFAULT_SUB_FETCH_UA} />
-				</label>
-				<label>
-				  订阅拉取 Cookie（可选）
-				  <AutoGrowTextarea value={editForm.fetch_cookie} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_cookie: e.target.value }))} rows={2} />
-				</label>
-				<label>
-				  手动到期时间（可选）
-				  <input
-					  type="datetime-local"
-					  value={editForm.manual_expire_at}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, manual_expire_at: e.target.value }))}
-					  onClick={(e) => openDateTimePicker(e.currentTarget)}
-					  onFocus={(e) => openDateTimePicker(e.currentTarget)}
-				  />
-				</label>
+				{editForm.type === 'subscription' ? (
+				  <>
+					<label>
+					  订阅拉取代理（可选）
+					  <input value={editForm.fetch_proxy_url} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_proxy_url: e.target.value }))} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />
+					</label>
+					<label>
+					  订阅拉取 UA
+					  <input value={editForm.fetch_user_agent} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_user_agent: e.target.value }))} placeholder={DEFAULT_SUB_FETCH_UA} />
+					</label>
+					<label>
+					  订阅拉取 Cookie（可选）
+					  <AutoGrowTextarea value={editForm.fetch_cookie} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_cookie: e.target.value }))} rows={2} />
+					</label>
+					<label>
+					  手动到期时间（可选）
+					  <input
+						  type="datetime-local"
+						  value={editForm.manual_expire_at}
+						  onChange={(e) => setEditForm((prev) => ({ ...prev, manual_expire_at: e.target.value }))}
+						  onClick={(e) => openDateTimePicker(e.currentTarget)}
+						  onFocus={(e) => openDateTimePicker(e.currentTarget)}
+					  />
+					</label>
+				  </>
+				) : null}
 				</>
 			  ) : null}
 			  {editForm.type === 'port' ? (
@@ -3406,7 +3623,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  </label>
 				</>
 			  ) : null}
-			  {editForm.type !== 'tracking' ? (
+			  {editForm.type !== 'tracking' && editForm.type !== 'node_group' ? (
 				<div className="form-row">
 				  <label>
 					{editForm.type === 'subscription' ? '订阅拉取间隔(秒，0=不定时)' : '间隔(秒)'}
@@ -3456,7 +3673,33 @@ function TargetDetailPage({ token }: { token: string }) {
             </form>
           </aside>
         </div>
-      ) : null}
+		) : null}
+
+	  {showAddNodeModal && isNodeGroupTarget ? (
+		<div className="overlay" role="dialog" aria-modal="true">
+		  <div className="confirm-card panel">
+			<div className="panel-head">
+			  <h3>添加节点</h3>
+			  <button type="button" className="icon-button" onClick={() => setShowAddNodeModal(false)}>
+				<X size={16} />
+			  </button>
+			</div>
+			<p className="muted">每行粘贴一个节点 URI，保存后会自动识别并加入节点列表。</p>
+			<AutoGrowTextarea
+			  value={nodeImportText}
+			  onChange={(e) => setNodeImportText(e.target.value)}
+			  rows={8}
+			  placeholder="vmess://...\nvless://...\nss://..."
+			/>
+			<div className="confirm-actions">
+			  <button type="button" onClick={() => setShowAddNodeModal(false)} disabled={importingNodes}>取消</button>
+			  <button type="button" className="primary" onClick={() => void handleImportNodeGroupURIs()} disabled={importingNodes}>
+				{importingNodes ? '保存中...' : '识别并添加'}
+			  </button>
+			</div>
+		  </div>
+		</div>
+	  ) : null}
 
       {confirmDelete ? (
         <div className="overlay" role="dialog" aria-modal="true">
@@ -3600,6 +3843,33 @@ function App() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
   })
   const [error, setError] = useState('')
+  const [toasts, setToasts] = useState<ToastMessage[]>([])
+  const toastTimersRef = useRef<Record<number, number>>({})
+
+  const removeToast = useCallback((id: number) => {
+	setToasts((prev) => prev.filter((item) => item.id !== id))
+	const timer = toastTimersRef.current[id]
+	if (typeof timer === 'number') {
+		window.clearTimeout(timer)
+		delete toastTimersRef.current[id]
+	}
+  }, [])
+
+  const pushToast = useCallback((type: ToastType, text: string, durationMS = 2200) => {
+	const id = Date.now() + Math.floor(Math.random() * 100000)
+	setToasts((prev) => [{ id, type, text }, ...prev].slice(0, 5))
+	toastTimersRef.current[id] = window.setTimeout(() => {
+		setToasts((prev) => prev.filter((item) => item.id !== id))
+		delete toastTimersRef.current[id]
+	}, Math.max(1000, durationMS))
+  }, [])
+
+  const notify: ToastNotifier = useMemo(() => ({
+	success: (text, durationMS) => pushToast('success', text, durationMS),
+	error: (text, durationMS) => pushToast('error', text, durationMS),
+	info: (text, durationMS) => pushToast('info', text, durationMS),
+	warning: (text, durationMS) => pushToast('warning', text, durationMS),
+  }), [pushToast])
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -3619,6 +3889,13 @@ function App() {
 	}
 	window.addEventListener(AUTH_EXPIRED_EVENT, onAuthExpired)
 	return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onAuthExpired)
+  }, [])
+
+  useEffect(() => {
+	return () => {
+		Object.values(toastTimersRef.current).forEach((timer) => window.clearTimeout(timer))
+		toastTimersRef.current = {}
+	}
   }, [])
 
   async function handleSetup(e: FormEvent<HTMLFormElement>) {
@@ -3706,6 +3983,19 @@ function App() {
 
   return (
     <BrowserRouter>
+      {toasts.length > 0 ? (
+		<div className="toast-stack" aria-live="polite" aria-atomic="false">
+		  {toasts.map((toast) => (
+			<div key={toast.id} className={`toast ${toast.type}`} role="status">
+			  <span className="toast-icon" aria-hidden="true">{renderToastIcon(toast.type)}</span>
+			  <p>{toast.text}</p>
+			  <button type="button" className="toast-close" onClick={() => removeToast(toast.id)} aria-label="关闭通知">
+				<X size={14} />
+			  </button>
+			</div>
+		  ))}
+		</div>
+	  ) : null}
       <Routes>
         <Route
           path="/"
@@ -3714,6 +4004,7 @@ function App() {
               token={token}
               theme={theme}
               setTheme={setTheme}
+              notify={notify}
               onLogout={() => {
                 localStorage.removeItem('all_monitor_token')
                 setToken('')

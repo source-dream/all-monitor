@@ -92,6 +92,7 @@ type subscriptionConfig struct {
 	ProbeURLsOverseas  []string `json:"probe_urls_overseas"`
 	SingBoxPath        string   `json:"singbox_path"`
 	ManualExpireAt     string   `json:"manual_expire_at"`
+	NodeURIs           []string `json:"node_uris"`
 }
 
 var defaultProbeURLsDomestic = []string{
@@ -129,7 +130,15 @@ type parsedSubscriptionNode struct {
 }
 
 func (s *TargetService) CreateTarget(target *model.MonitorTarget) error {
-	return s.DB.Create(target).Error
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(target).Error; err != nil {
+			return err
+		}
+		if target.Type == "node_group" {
+			return s.syncManualNodeList(tx, target.ID, target.ConfigJSON)
+		}
+		return nil
+	})
 }
 
 func (s *TargetService) ListTargets() ([]model.MonitorTarget, error) {
@@ -148,7 +157,15 @@ func (s *TargetService) UpdateTarget(id uint, input *model.MonitorTarget) error 
 		"enabled":      input.Enabled,
 		"config_json":  input.ConfigJSON,
 	}
-	return s.DB.Model(&model.MonitorTarget{}).Where("id = ?", id).Updates(updates).Error
+	return s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.MonitorTarget{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+			return err
+		}
+		if input.Type == "node_group" {
+			return s.syncManualNodeList(tx, id, input.ConfigJSON)
+		}
+		return nil
+	})
 }
 
 func (s *TargetService) DeleteTarget(id uint) error {
@@ -219,6 +236,46 @@ func (s *TargetService) CheckNow(id uint) (*model.CheckResult, error) {
 			LatencyMS: snap.LatencyMS,
 			ErrorMsg:  snap.ErrorMsg,
 			CheckedAt: snap.CheckedAt,
+		}
+		if err := s.DB.Create(&result).Error; err != nil {
+			return nil, err
+		}
+		return &result, nil
+	}
+	if target.Type == "node_group" {
+		if _, err := s.RefreshSubscriptionLatency(id); err != nil {
+			return nil, err
+		}
+		var nodeTotal int64
+		if err := s.DB.Model(&model.SubscriptionNode{}).Where("target_id = ?", id).Count(&nodeTotal).Error; err != nil {
+			return nil, err
+		}
+		var availableTotal int64
+		if err := s.DB.Model(&model.SubscriptionNode{}).
+			Where("target_id = ? AND last_latency_ms IS NOT NULL AND last_latency_ms >= 0", id).
+			Count(&availableTotal).Error; err != nil {
+			return nil, err
+		}
+		var avgLatency float64
+		if err := s.DB.Model(&model.SubscriptionNode{}).
+			Where("target_id = ? AND last_latency_ms IS NOT NULL AND last_latency_ms >= 0", id).
+			Select("COALESCE(AVG(last_latency_ms), 0)").
+			Scan(&avgLatency).Error; err != nil {
+			return nil, err
+		}
+		errMsg := ""
+		success := availableTotal > 0
+		if nodeTotal == 0 {
+			errMsg = "no nodes"
+		} else if !success {
+			errMsg = "all nodes unreachable"
+		}
+		result := model.CheckResult{
+			TargetID:  target.ID,
+			Success:   success,
+			LatencyMS: int(avgLatency),
+			ErrorMsg:  errMsg,
+			CheckedAt: time.Now(),
 		}
 		if err := s.DB.Create(&result).Error; err != nil {
 			return nil, err
@@ -304,6 +361,59 @@ func (s *TargetService) SubscriptionSummary(id uint) (map[string]any, error) {
 	target, cfg, targetErr := s.getSubscriptionTarget(id)
 	if targetErr != nil {
 		return nil, targetErr
+	}
+	if target.Type == "node_group" {
+		var nodes []model.SubscriptionNode
+		if err := s.DB.Where("target_id = ?", id).Find(&nodes).Error; err != nil {
+			return nil, err
+		}
+		protocolStats := map[string]int{}
+		availableTotal := 0
+		latestCheckedAt := time.Time{}
+		var avgLatency float64
+		for _, node := range nodes {
+			protocolStats[node.Protocol]++
+			if node.LastLatencyMS != nil && *node.LastLatencyMS >= 0 {
+				availableTotal++
+			}
+			if node.LastLatencyCheckedAt != nil && node.LastLatencyCheckedAt.After(latestCheckedAt) {
+				latestCheckedAt = *node.LastLatencyCheckedAt
+			}
+		}
+		if err := s.DB.Model(&model.SubscriptionNode{}).
+			Where("target_id = ? AND last_latency_ms IS NOT NULL AND last_latency_ms >= 0", id).
+			Select("COALESCE(AVG(last_latency_ms), 0)").
+			Scan(&avgLatency).Error; err != nil {
+			return nil, err
+		}
+		var latestAt any
+		if !latestCheckedAt.IsZero() {
+			latestAt = latestCheckedAt
+		}
+		errMsg := ""
+		reachable := availableTotal > 0
+		if len(nodes) == 0 {
+			errMsg = "no nodes"
+		} else if !reachable {
+			errMsg = "all nodes unreachable"
+		}
+		return map[string]any{
+			"has_data":        len(nodes) > 0,
+			"refreshing":      false,
+			"reachable":       reachable,
+			"http_status":     0,
+			"latency_ms":      int(avgLatency),
+			"error_msg":       errMsg,
+			"node_total":      len(nodes),
+			"available_total": availableTotal,
+			"protocol_stats":  protocolStats,
+			"upload_bytes":    0,
+			"download_bytes":  0,
+			"total_bytes":     0,
+			"remaining_bytes": 0,
+			"expire_at":       parseManualExpireAt(cfg.ManualExpireAt),
+			"last_checked_at": latestAt,
+		}, nil
 	}
 
 	var latest model.SubscriptionSnapshot
@@ -408,6 +518,68 @@ func (s *TargetService) SubscriptionNodes(id uint, sortBy, order, search, protoc
 	})
 
 	return rows, nil
+}
+
+func (s *TargetService) SubscriptionSeries(id uint, start time.Time, end time.Time) ([]map[string]any, error) {
+	if !start.Before(end) {
+		return nil, errors.New("invalid time range")
+	}
+	if _, _, err := s.getSubscriptionTarget(id); err != nil {
+		return nil, err
+	}
+	bucketSize := 5 * time.Minute
+	start = start.Truncate(bucketSize)
+	end = end.Truncate(bucketSize)
+	if !start.Before(end) {
+		end = start.Add(bucketSize)
+	}
+	var checks []model.SubscriptionNodeCheck
+	if err := s.DB.Where("target_id = ? AND checked_at >= ? AND checked_at <= ?", id, start, end).Order("checked_at asc").Find(&checks).Error; err != nil {
+		return nil, err
+	}
+	type bucketStat struct {
+		Total     int
+		Success   int
+		Available map[string]struct{}
+	}
+	stats := map[time.Time]*bucketStat{}
+	for _, row := range checks {
+		bucket := row.CheckedAt.Truncate(bucketSize)
+		if bucket.Before(start) || bucket.After(end) {
+			continue
+		}
+		cur, ok := stats[bucket]
+		if !ok {
+			cur = &bucketStat{Available: map[string]struct{}{}}
+			stats[bucket] = cur
+		}
+		cur.Total += 1
+		if row.Success {
+			cur.Success += 1
+			cur.Available[row.NodeUID] = struct{}{}
+		}
+	}
+	out := make([]map[string]any, 0, int(end.Sub(start)/bucketSize)+1)
+	for ts := start; !ts.After(end); ts = ts.Add(bucketSize) {
+		cur := stats[ts]
+		availability := 0.0
+		availableNodes := 0
+		totalChecks := 0
+		if cur != nil {
+			totalChecks = cur.Total
+			availableNodes = len(cur.Available)
+			if cur.Total > 0 {
+				availability = float64(cur.Success) / float64(cur.Total) * 100
+			}
+		}
+		out = append(out, map[string]any{
+			"bucket":          ts,
+			"available_nodes": availableNodes,
+			"availability":    availability,
+			"total_checks":    totalChecks,
+		})
+	}
+	return out, nil
 }
 
 func (s *TargetService) SubscriptionNodeSummary(id uint, nodeUID string, since time.Time) (map[string]any, error) {
@@ -848,12 +1020,94 @@ func (s *TargetService) refreshSubscriptionOnce(id uint) (*model.SubscriptionSna
 			}
 			rows = append(rows, row)
 		}
-		return tx.Create(&rows).Error
+		return tx.CreateInBatches(&rows, 30).Error
 	}); err != nil {
 		return nil, err
 	}
 
 	return snap, nil
+}
+
+func (s *TargetService) syncManualNodeList(tx *gorm.DB, targetID uint, configJSON string) error {
+	cfg := parseSubscriptionConfig(configJSON)
+	if len(cfg.NodeURIs) == 0 {
+		return tx.Where("target_id = ?", targetID).Delete(&model.SubscriptionNode{}).Error
+	}
+	nodes := parseURIList(strings.Join(cfg.NodeURIs, "\n"))
+	if len(nodes) == 0 {
+		return errors.New("node_uris has no valid nodes")
+	}
+
+	var old []model.SubscriptionNode
+	if err := tx.Where("target_id = ?", targetID).Find(&old).Error; err != nil {
+		return err
+	}
+	latencyMap := map[string]struct {
+		Latency       *int
+		ScoreMS       int
+		TCPMS         int
+		TLSMS         int
+		E2EDomesticMS int
+		E2EOverseasMS int
+		JitterMS      int
+		ProbeMode     string
+		FailStage     string
+		FailReason    string
+		ErrorMsg      string
+		CheckedAt     *time.Time
+	}{}
+	for _, item := range old {
+		latencyMap[item.NodeUID] = struct {
+			Latency       *int
+			ScoreMS       int
+			TCPMS         int
+			TLSMS         int
+			E2EDomesticMS int
+			E2EOverseasMS int
+			JitterMS      int
+			ProbeMode     string
+			FailStage     string
+			FailReason    string
+			ErrorMsg      string
+			CheckedAt     *time.Time
+		}{
+			Latency:       item.LastLatencyMS,
+			ScoreMS:       item.LastScoreMS,
+			TCPMS:         item.LastTCPMS,
+			TLSMS:         item.LastTLSMS,
+			E2EDomesticMS: item.LastE2EDomesticMS,
+			E2EOverseasMS: item.LastE2EOverseasMS,
+			JitterMS:      item.LastJitterMS,
+			ProbeMode:     item.LastProbeMode,
+			FailStage:     item.LastFailStage,
+			FailReason:    item.LastFailReason,
+			ErrorMsg:      item.LastErrorMsg,
+			CheckedAt:     item.LastLatencyCheckedAt,
+		}
+	}
+	if err := tx.Where("target_id = ?", targetID).Delete(&model.SubscriptionNode{}).Error; err != nil {
+		return err
+	}
+	rows := make([]model.SubscriptionNode, 0, len(nodes))
+	for _, node := range nodes {
+		row := model.SubscriptionNode{TargetID: targetID, NodeUID: node.UID, Name: node.Name, Protocol: node.Protocol, Server: node.Server, Port: node.Port, SourceOrder: node.Order, RawJSON: node.RawJSON}
+		if oldVal, ok := latencyMap[node.UID]; ok {
+			row.LastLatencyMS = oldVal.Latency
+			row.LastScoreMS = oldVal.ScoreMS
+			row.LastTCPMS = oldVal.TCPMS
+			row.LastTLSMS = oldVal.TLSMS
+			row.LastE2EDomesticMS = oldVal.E2EDomesticMS
+			row.LastE2EOverseasMS = oldVal.E2EOverseasMS
+			row.LastJitterMS = oldVal.JitterMS
+			row.LastProbeMode = oldVal.ProbeMode
+			row.LastFailStage = oldVal.FailStage
+			row.LastFailReason = oldVal.FailReason
+			row.LastErrorMsg = oldVal.ErrorMsg
+			row.LastLatencyCheckedAt = oldVal.CheckedAt
+		}
+		rows = append(rows, row)
+	}
+	return tx.CreateInBatches(&rows, 30).Error
 }
 
 func (s *TargetService) ListResults(id uint, limit int) ([]model.CheckResult, error) {
@@ -928,7 +1182,7 @@ func (s *TargetService) IngestTracking(writeKey string, items []TrackingIngestIt
 		})
 	}
 
-	if err := s.DB.Create(&rows).Error; err != nil {
+	if err := s.DB.CreateInBatches(&rows, 50).Error; err != nil {
 		return target.ID, 0, err
 	}
 
@@ -1131,8 +1385,8 @@ func (s *TargetService) getSubscriptionTarget(id uint) (*model.MonitorTarget, *s
 	if err != nil {
 		return nil, nil, err
 	}
-	if target.Type != "subscription" {
-		return nil, nil, errors.New("target is not subscription")
+	if target.Type != "subscription" && target.Type != "node_group" {
+		return nil, nil, errors.New("target is not subscription-like")
 	}
 	cfg := parseSubscriptionConfig(target.ConfigJSON)
 	return target, cfg, nil
@@ -1203,6 +1457,15 @@ func parseSubscriptionConfig(raw string) *subscriptionConfig {
 	if strings.TrimSpace(cfg.SingBoxPath) == "" {
 		cfg.SingBoxPath = "sing-box"
 	}
+	nodeURIs := make([]string, 0, len(cfg.NodeURIs))
+	for _, row := range cfg.NodeURIs {
+		s := strings.TrimSpace(row)
+		if s == "" {
+			continue
+		}
+		nodeURIs = append(nodeURIs, s)
+	}
+	cfg.NodeURIs = nodeURIs
 	return cfg
 }
 

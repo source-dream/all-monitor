@@ -63,7 +63,7 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 				return
 			}
 
-			if target.Type == "subscription" && s.Target != nil {
+			if (target.Type == "subscription" || target.Type == "node_group") && s.Target != nil {
 				if _, err := s.Target.CheckNow(target.ID); err != nil {
 					log.Printf("subscription check failed: %v", err)
 				}
@@ -104,7 +104,7 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 
 func shouldRunTargetNow(db *gorm.DB, target model.MonitorTarget) bool {
 	interval := target.IntervalSec
-	if target.Type == "subscription" && interval <= 0 {
+	if (target.Type == "subscription" || target.Type == "node_group") && interval <= 0 {
 		return false
 	}
 	if interval <= 0 {

@@ -110,10 +110,14 @@ func (h *Handler) CreateTarget(c *gin.Context) {
 		if req.IntervalSec < 0 {
 			req.IntervalSec = 0
 		}
+	} else if req.Type == "node_group" {
+		if req.IntervalSec < 0 {
+			req.IntervalSec = 0
+		}
 	} else if req.IntervalSec <= 0 {
 		req.IntervalSec = 60
 	}
-	if req.Type == "subscription" {
+	if req.Type == "subscription" || req.Type == "node_group" {
 		normalizedCfg, cfgErr := normalizeSubscriptionConfig(req.ConfigJSON)
 		if cfgErr != nil {
 			response.Err(c, 400, 40001, cfgErr.Error())
@@ -128,6 +132,10 @@ func (h *Handler) CreateTarget(c *gin.Context) {
 		}
 		req.IntervalSec = 60
 		req.TimeoutMS = 5000
+	} else if req.Type == "node_group" {
+		if strings.TrimSpace(req.Endpoint) == "" {
+			req.Endpoint = "node-group://manual"
+		}
 	} else if req.Type == "port" {
 		if strings.TrimSpace(req.Endpoint) == "" {
 			response.Err(c, 400, 40001, "endpoint is required")
@@ -202,6 +210,10 @@ func (h *Handler) UpdateTarget(c *gin.Context) {
 		if input.IntervalSec < 0 {
 			input.IntervalSec = 0
 		}
+	} else if input.Type == "node_group" {
+		if input.IntervalSec < 0 {
+			input.IntervalSec = 0
+		}
 	} else if input.IntervalSec <= 0 {
 		input.IntervalSec = 60
 	}
@@ -211,7 +223,7 @@ func (h *Handler) UpdateTarget(c *gin.Context) {
 	if input.ConfigJSON == "" {
 		input.ConfigJSON = "{}"
 	}
-	if input.Type == "subscription" {
+	if input.Type == "subscription" || input.Type == "node_group" {
 		normalizedCfg, cfgErr := normalizeSubscriptionConfig(input.ConfigJSON)
 		if cfgErr != nil {
 			response.Err(c, 400, 40001, cfgErr.Error())
@@ -226,6 +238,10 @@ func (h *Handler) UpdateTarget(c *gin.Context) {
 		}
 		input.IntervalSec = 60
 		input.TimeoutMS = 5000
+	} else if input.Type == "node_group" {
+		if strings.TrimSpace(input.Endpoint) == "" {
+			input.Endpoint = "node-group://manual"
+		}
 	} else if input.Type == "port" {
 		if strings.TrimSpace(input.Endpoint) == "" {
 			response.Err(c, 400, 40001, "endpoint is required")
@@ -320,6 +336,8 @@ func normalizeTargetType(raw string) string {
 		return "ai"
 	case "tcp", "server", "node":
 		return "port"
+	case "nodegroup", "nodes", "node-group":
+		return "node_group"
 	default:
 		return val
 	}
@@ -529,6 +547,51 @@ func (h *Handler) SubscriptionSummary(c *gin.Context) {
 		return
 	}
 	response.OK(c, data)
+}
+
+func (h *Handler) SubscriptionSeries(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		response.Err(c, 400, 40003, "invalid id")
+		return
+	}
+	now := time.Now()
+	start := now.Add(-24 * time.Hour)
+	end := now
+	if rawHours := strings.TrimSpace(c.Query("hours")); rawHours != "" {
+		hours, convErr := strconv.Atoi(rawHours)
+		if convErr != nil || hours <= 0 || hours > 24*30 {
+			response.Err(c, 400, 40001, "invalid hours")
+			return
+		}
+		start = now.Add(-time.Duration(hours) * time.Hour)
+	}
+	if rawStart := strings.TrimSpace(c.Query("start")); rawStart != "" {
+		ts, parseErr := time.Parse(time.RFC3339, rawStart)
+		if parseErr != nil {
+			response.Err(c, 400, 40001, "invalid start")
+			return
+		}
+		start = ts
+	}
+	if rawEnd := strings.TrimSpace(c.Query("end")); rawEnd != "" {
+		ts, parseErr := time.Parse(time.RFC3339, rawEnd)
+		if parseErr != nil {
+			response.Err(c, 400, 40001, "invalid end")
+			return
+		}
+		end = ts
+	}
+	if !start.Before(end) {
+		response.Err(c, 400, 40001, "invalid time range")
+		return
+	}
+	rows, seriesErr := h.Target.SubscriptionSeries(uint(id), start, end)
+	if seriesErr != nil {
+		response.Err(c, 500, 50031, "load subscription series failed")
+		return
+	}
+	response.OK(c, rows)
 }
 
 func (h *Handler) SubscriptionNodes(c *gin.Context) {
@@ -748,6 +811,7 @@ type subscriptionConfigPayload struct {
 	ProbeURLsOverseas  []string `json:"probe_urls_overseas"`
 	SingBoxPath        string   `json:"singbox_path"`
 	ManualExpireAt     string   `json:"manual_expire_at"`
+	NodeURIs           []string `json:"node_uris"`
 }
 
 func normalizeSubscriptionConfig(raw string) (string, error) {
@@ -807,6 +871,15 @@ func normalizeSubscriptionConfig(raw string) (string, error) {
 	if strings.TrimSpace(cfg.SingBoxPath) == "" {
 		cfg.SingBoxPath = "sing-box"
 	}
+	nodeURIs := make([]string, 0, len(cfg.NodeURIs))
+	for _, row := range cfg.NodeURIs {
+		s := strings.TrimSpace(row)
+		if s == "" {
+			continue
+		}
+		nodeURIs = append(nodeURIs, s)
+	}
+	cfg.NodeURIs = nodeURIs
 	cfg.ManualExpireAt = strings.TrimSpace(cfg.ManualExpireAt)
 	if cfg.ManualExpireAt != "" {
 		layouts := []string{time.RFC3339, "2006-01-02T15:04", "2006-01-02 15:04:05"}
