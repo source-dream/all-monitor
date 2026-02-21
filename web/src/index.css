@@ -55,7 +55,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -85,13 +86,23 @@ button:disabled {
 }
 
 input,
-select {
+select,
+textarea {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px 10px;
   color: var(--text);
   background: var(--bg-elevated);
+}
+
+.auto-grow-textarea {
+  min-height: 72px;
+  line-height: 1.45;
+  resize: none;
+  overflow: hidden;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
 }
 
 .workspace {
@@ -108,8 +119,25 @@ select {
   padding: 16px 18px;
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
   box-shadow: var(--panel-shadow);
+}
+
+.header-main {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 4px;
+}
+
+.header-main .endpoint-link {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workspace-header h1 {
@@ -121,6 +149,7 @@ select {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  flex: 0 0 auto;
 }
 
 .header-actions button {
@@ -129,6 +158,8 @@ select {
   justify-content: center;
   gap: 6px;
   line-height: 1;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .header-actions button svg {
@@ -281,17 +312,31 @@ select {
   justify-content: space-between;
   align-items: flex-start;
   gap: 8px;
+  min-width: 0;
+}
+
+.card-head-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .card-head-actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
+  margin-left: 8px;
 }
 
-.card-head h3 {
+.card-head-main h3 {
   margin: 0;
   font-size: 1.02rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .endpoint-link {
@@ -299,6 +344,15 @@ select {
   font-size: 0.9rem;
   text-decoration: none;
   border-bottom: 1px dashed transparent;
+}
+
+.card-head-main .endpoint-link {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .endpoint-link:hover {
@@ -458,7 +512,11 @@ select {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 8px 12px;
+  line-height: 1;
   margin-bottom: 8px;
+  justify-self: start;
+  width: auto;
 }
 
 .detail-title {
@@ -837,6 +895,15 @@ select {
   gap: 4px;
   color: var(--text-muted);
   font-size: 0.9rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.log-row-body span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .rank-list {
@@ -872,6 +939,130 @@ select {
   gap: 4px 8px;
   color: var(--text-muted);
   font-size: 0.88rem;
+}
+
+.subscription-panel-full {
+  grid-column: 1 / -1;
+}
+
+.subscription-progress {
+  margin-top: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.subscription-progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg-elevated) 88%, transparent);
+  overflow: hidden;
+}
+
+.subscription-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in srgb, #22c55e 85%, var(--brand)), color-mix(in srgb, #06b6d4 80%, var(--brand)));
+  transition: width 180ms ease;
+}
+
+.subscription-node-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.subscription-node-grid.compact {
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+}
+
+.subscription-node-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
+}
+
+.subscription-node-card:hover {
+  border-color: color-mix(in srgb, var(--brand) 65%, var(--border));
+}
+
+.subscription-node-card.latency-fast {
+  border-color: color-mix(in srgb, #22c55e 55%, var(--border));
+}
+
+.subscription-node-card.latency-good {
+  border-color: color-mix(in srgb, #06b6d4 55%, var(--border));
+}
+
+.subscription-node-card.latency-slow {
+  border-color: color-mix(in srgb, #f59e0b 58%, var(--border));
+}
+
+.subscription-node-card.latency-bad {
+  border-color: color-mix(in srgb, #f97316 62%, var(--border));
+}
+
+.subscription-node-card.latency-error {
+  border-color: color-mix(in srgb, #dc2626 78%, var(--border));
+}
+
+.subscription-node-card.latency-pending {
+  border-color: color-mix(in srgb, #64748b 45%, var(--border));
+}
+
+.subscription-node-card.latency-degraded {
+  border-color: color-mix(in srgb, #f59e0b 45%, #64748b);
+}
+
+.subscription-node-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.subscription-node-head strong {
+  display: block;
+  min-width: 0;
+  flex: 1;
+  max-width: 100%;
+  font-size: 0.88rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subscription-node-head .muted {
+  flex: 0 0 auto;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.subscription-node-meta {
+  display: flex;
+  align-items: center;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.latency-text {
+  font-weight: 600;
+}
+
+.latency-text.latency-error {
+  color: #dc2626;
+}
+
+.latency-text.latency-pending {
+  color: var(--text-muted);
 }
 
 .drawer-mask {
@@ -981,6 +1172,12 @@ select {
   background: #450a0a;
 }
 
+.auth-expired-tip {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
 :root[data-theme='light'] .error {
   color: #991b1b;
   border-color: #fecaca;
@@ -1053,6 +1250,15 @@ select {
   }
 
   .rank-row-body {
+    grid-template-columns: 1fr;
+  }
+
+  .subscription-node-grid,
+  .subscription-node-grid.compact {
+    grid-template-columns: 1fr;
+  }
+
+  .subscription-node-meta {
     grid-template-columns: 1fr;
   }
 }

@@ -3,7 +3,9 @@ package scheduler
 import (
 	"all-monitor/server/internal/checker"
 	"all-monitor/server/internal/model"
+	"all-monitor/server/internal/service"
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -14,6 +16,7 @@ import (
 type Scheduler struct {
 	DB          *gorm.DB
 	Concurrency int
+	Target      *service.TargetService
 }
 
 func (s *Scheduler) Start(ctx context.Context) {
@@ -56,6 +59,18 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 				return
 			}
 
+			if !shouldRunTargetNow(s.DB, target) {
+				return
+			}
+
+			if target.Type == "subscription" && s.Target != nil {
+				if _, err := s.Target.CheckNow(target.ID); err != nil {
+					log.Printf("subscription check failed: %v", err)
+				}
+				s.Target.MaybeAutoRefreshSubscriptionLatency(target.ID)
+				return
+			}
+
 			ck, err := checker.SelectChecker(target.Type)
 			if err != nil {
 				return
@@ -80,8 +95,31 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 					log.Printf("save finance snapshot failed: %v", err)
 				}
 			}
+
 		}()
 	}
 
 	wg.Wait()
+}
+
+func shouldRunTargetNow(db *gorm.DB, target model.MonitorTarget) bool {
+	interval := target.IntervalSec
+	if target.Type == "subscription" && interval <= 0 {
+		return false
+	}
+	if interval <= 0 {
+		interval = 60
+	}
+
+	var last model.CheckResult
+	err := db.Where("target_id = ?", target.ID).Order("checked_at desc").First(&last).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return true
+		}
+		log.Printf("load latest result failed (target=%d): %v", target.ID, err)
+		return true
+	}
+
+	return last.CheckedAt.Before(time.Now().Add(-time.Duration(interval) * time.Second))
 }

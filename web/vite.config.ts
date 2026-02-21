@@ -28,12 +28,28 @@ async function findDevPort(startPort: number, maxOffset: number): Promise<number
 export default defineConfig(async () => {
   const preferredPort = Number(process.env.PORT ?? 5173)
   const devPort = await findDevPort(preferredPort, 20)
+  const proxyTarget = process.env.VITE_DEV_API_PROXY_TARGET ?? 'http://127.0.0.1:8080'
 
   return {
     plugins: [react()],
+    build: {
+      outDir: '../server/internal/webstatic/dist',
+      emptyOutDir: false,
+    },
     server: {
+      host: true,
       port: devPort,
       strictPort: true,
+      proxy: {
+        '/api': {
+          target: proxyTarget,
+          changeOrigin: true,
+        },
+        '/sdk': {
+          target: proxyTarget,
+          changeOrigin: true,
+        },
+      },
     },
   }
 })

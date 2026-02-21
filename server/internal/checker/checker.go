@@ -19,7 +19,9 @@ type Checker interface {
 }
 
 type HTTPChecker struct{}
-type TCPChecker struct{}
+type PortChecker struct {
+	ForceProtocol string
+}
 type AIRelayChecker struct{}
 type TrackingChecker struct{}
 
@@ -58,9 +60,46 @@ func (c *HTTPChecker) Check(ctx context.Context, target model.MonitorTarget) (mo
 	return result, nil, nil
 }
 
-func (c *TCPChecker) Type() string { return "tcp" }
+func (c *PortChecker) Type() string { return "port" }
 
-func (c *TCPChecker) Check(ctx context.Context, target model.MonitorTarget) (model.CheckResult, *model.RelayFinanceSnapshot, error) {
+type portConfig struct {
+	Protocol   string `json:"protocol"`
+	UDPMode    string `json:"udp_mode"`
+	UDPPayload string `json:"udp_payload"`
+	UDPExpect  string `json:"udp_expect"`
+}
+
+func parsePortConfig(raw string) portConfig {
+	cfg := portConfig{Protocol: "tcp", UDPMode: "send_only", UDPPayload: "ping"}
+	if strings.TrimSpace(raw) == "" {
+		return cfg
+	}
+	_ = json.Unmarshal([]byte(raw), &cfg)
+	if cfg.Protocol != "udp" {
+		cfg.Protocol = "tcp"
+	}
+	if cfg.UDPMode != "request_response" {
+		cfg.UDPMode = "send_only"
+	}
+	if strings.TrimSpace(cfg.UDPPayload) == "" {
+		cfg.UDPPayload = "ping"
+	}
+	return cfg
+}
+
+func (c *PortChecker) Check(ctx context.Context, target model.MonitorTarget) (model.CheckResult, *model.RelayFinanceSnapshot, error) {
+	cfg := parsePortConfig(target.ConfigJSON)
+	protocol := cfg.Protocol
+	if c.ForceProtocol != "" {
+		protocol = c.ForceProtocol
+	}
+	if protocol == "udp" {
+		return c.checkUDP(ctx, target, cfg), nil, nil
+	}
+	return c.checkTCP(ctx, target), nil, nil
+}
+
+func (c *PortChecker) checkTCP(ctx context.Context, target model.MonitorTarget) model.CheckResult {
 	start := time.Now()
 	d := net.Dialer{Timeout: time.Duration(target.TimeoutMS) * time.Millisecond}
 	conn, err := d.DialContext(ctx, "tcp", target.Endpoint)
@@ -71,7 +110,7 @@ func (c *TCPChecker) Check(ctx context.Context, target model.MonitorTarget) (mod
 			LatencyMS: int(time.Since(start).Milliseconds()),
 			ErrorMsg:  err.Error(),
 			CheckedAt: time.Now(),
-		}, nil, nil
+		}
 	}
 	_ = conn.Close()
 
@@ -80,7 +119,36 @@ func (c *TCPChecker) Check(ctx context.Context, target model.MonitorTarget) (mod
 		Success:   true,
 		LatencyMS: int(time.Since(start).Milliseconds()),
 		CheckedAt: time.Now(),
-	}, nil, nil
+	}
+}
+
+func (c *PortChecker) checkUDP(ctx context.Context, target model.MonitorTarget, cfg portConfig) model.CheckResult {
+	start := time.Now()
+	d := net.Dialer{Timeout: time.Duration(target.TimeoutMS) * time.Millisecond}
+	conn, err := d.DialContext(ctx, "udp", target.Endpoint)
+	if err != nil {
+		return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: err.Error(), CheckedAt: time.Now()}
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(time.Duration(target.TimeoutMS) * time.Millisecond))
+	payload := []byte(cfg.UDPPayload)
+	if _, err := conn.Write(payload); err != nil {
+		return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: err.Error(), CheckedAt: time.Now()}
+	}
+
+	if cfg.UDPMode == "request_response" {
+		buf := make([]byte, 1024)
+		n, err := conn.Read(buf)
+		if err != nil {
+			return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: err.Error(), CheckedAt: time.Now()}
+		}
+		if strings.TrimSpace(cfg.UDPExpect) != "" && !strings.Contains(string(buf[:n]), cfg.UDPExpect) {
+			return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: "udp response mismatch", CheckedAt: time.Now()}
+		}
+	}
+
+	return model.CheckResult{TargetID: target.ID, Success: true, LatencyMS: int(time.Since(start).Milliseconds()), CheckedAt: time.Now()}
 }
 
 func (c *AIRelayChecker) Type() string { return "ai" }
@@ -232,8 +300,10 @@ func SelectChecker(targetType string) (Checker, error) {
 			return &AIRelayChecker{}, nil
 		}
 		return &HTTPChecker{}, nil
+	case "port":
+		return &PortChecker{}, nil
 	case "tcp", "server", "node":
-		return &TCPChecker{}, nil
+		return &PortChecker{ForceProtocol: "tcp"}, nil
 	case "subscription":
 		return &HTTPChecker{}, nil
 	case "ai":

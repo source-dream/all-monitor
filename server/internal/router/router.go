@@ -34,5 +34,15 @@ func Register(r *gin.Engine, h *handler.Handler, jwtSecret string) {
 		authed.GET("/targets/:id/tracking/summary", h.TrackingSummary)
 		authed.GET("/targets/:id/tracking/series", h.TrackingSeries)
 		authed.GET("/targets/:id/tracking/events", h.TrackingEvents)
+		authed.GET("/targets/:id/subscription/summary", h.SubscriptionSummary)
+		authed.GET("/targets/:id/subscription/nodes", h.SubscriptionNodes)
+		authed.POST("/targets/:id/subscription/latency/refresh", h.SubscriptionRefreshLatency)
+		authed.POST("/targets/:id/subscription/latency/jobs", h.StartSubscriptionLatencyJob)
+		authed.GET("/targets/:id/subscription/latency/jobs/:job_id", h.SubscriptionLatencyJobStatus)
+		authed.GET("/targets/:id/subscription/latency/jobs/:job_id/events", h.SubscriptionLatencyJobEvents)
+		authed.GET("/targets/:id/subscription/nodes/:uid/summary", h.SubscriptionNodeSummary)
+		authed.GET("/targets/:id/subscription/nodes/:uid/series", h.SubscriptionNodeSeries)
+		authed.GET("/targets/:id/subscription/nodes/:uid/logs", h.SubscriptionNodeLogs)
+		authed.POST("/targets/:id/subscription/nodes/:uid/check-now", h.SubscriptionNodeCheckNow)
 	}
 }

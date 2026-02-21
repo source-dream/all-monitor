@@ -8,15 +8,19 @@ web/node_modules/
 web/dist/
 
 # Go
+bin/
 server/bin/
 server/.env
 server/data/*.db
 server/data/.fuse_hidden*
 server/data/*.xdb
+server/internal/webstatic/dist/*
+!server/internal/webstatic/dist/.keep
 
 # Local env/config
 *.local
 *.log
+.dev.pids
 
 # Others
 docs/

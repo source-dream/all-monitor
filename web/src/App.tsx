@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { FormEvent } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -26,6 +26,9 @@ type ApiBody<T> = {
   message: string
   data: T
 }
+
+const AUTH_EXPIRED_EVENT = 'all_monitor_auth_expired'
+const DEFAULT_SUB_FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
 type ThemeMode = 'light' | 'dark'
 
@@ -101,9 +104,114 @@ type TrackingSeriesPoint = {
 	uv: number
 }
 
+type SubscriptionSummary = {
+	has_data: boolean
+	reachable?: boolean
+	http_status?: number
+	latency_ms?: number
+	error_msg?: string
+	node_total?: number
+	available_total?: number
+	protocol_stats?: Record<string, number>
+	upload_bytes?: number
+	download_bytes?: number
+	total_bytes?: number
+	remaining_bytes?: number
+	expire_at?: string
+	last_checked_at?: string
+}
+
+type SubscriptionNode = {
+	id: number
+	node_uid: string
+	name: string
+	protocol: string
+	server: string
+	port: number
+	source_order: number
+	last_latency_ms?: number
+	last_score_ms?: number
+	last_tcp_ms?: number
+	last_tls_ms?: number
+	last_e2e_domestic_ms?: number
+	last_e2e_overseas_ms?: number
+	last_jitter_ms?: number
+	last_probe_mode?: string
+	last_fail_stage?: string
+	last_fail_reason?: string
+	last_error_msg?: string
+	last_latency_checked_at?: string
+}
+
+type SubscriptionNodeCheck = {
+	id: number
+	target_id: number
+	node_uid: string
+	success: boolean
+	latency_ms: number
+	score_ms: number
+	tcp_ms: number
+	tls_ms: number
+	e2e_domestic_ms: number
+	e2e_overseas_ms: number
+	jitter_ms: number
+	probe_mode: string
+	fail_stage: string
+	fail_reason: string
+	error_msg: string
+	checked_at: string
+}
+
+type SubscriptionNodeSummary = {
+	node: SubscriptionNode
+	availability_24h: number
+	avg_latency_24h_ms: number
+	check_count_24h: number
+	success_count_24h: number
+	latest_latency_ms?: number
+	latest_checked_at?: string
+}
+
+type SubscriptionNodeSeriesPoint = {
+	checked_at: string
+	success: boolean
+	latency_ms: number
+	availability: number
+	error_msg: string
+}
+
+type SubscriptionLatencyJobStatus = {
+	job_id: string
+	target_id: number
+	status: 'running' | 'done' | 'failed'
+	total: number
+	done: number
+	success: number
+	failed: number
+	started_at: string
+	finished_at?: string
+	updated_at: string
+	message?: string
+}
+
+type SubscriptionLatencyJobNode = {
+	node_uid: string
+	latency_ms?: number
+	error_msg?: string
+	checked_at: string
+}
+
+type SubscriptionLatencyJobEvent = {
+	type: string
+	job: SubscriptionLatencyJobStatus
+	node?: SubscriptionLatencyJobNode
+}
+
 type TrackingMetricMode = 'pv' | 'uv' | 'both'
 type UVIdentity = 'client_id' | 'ip_ua_hash' | 'ip_client_hash'
 type UserGroupMode = 'ip' | 'device_id' | 'ip_device'
+type PortProtocol = 'tcp' | 'udp'
+type UDPMode = 'send_only' | 'request_response'
 
 type TrackingConfig = {
 	write_key: string
@@ -111,6 +219,32 @@ type TrackingConfig = {
 	uv_identity: UVIdentity
 	inactive_threshold_min: number
 	user_group_mode: UserGroupMode
+}
+
+type PortConfig = {
+	protocol: PortProtocol
+	udp_mode: UDPMode
+	udp_payload: string
+	udp_expect: string
+}
+
+type SubscriptionConfig = {
+	latency_concurrency: number
+	latency_timeout_ms: number
+	e2e_timeout_ms: number
+	fetch_timeout_ms: number
+	fetch_retries: number
+	fetch_proxy_url: string
+	fetch_user_agent: string
+	fetch_cookie: string
+	latency_probe_count: number
+	latency_interval_sec: number
+	weight_domestic: number
+	weight_overseas: number
+	probe_urls_domestic: string[]
+	probe_urls_overseas: string[]
+	singbox_path: string
+	manual_expire_at: string
 }
 
 type TrackingStatusInfo = {
@@ -129,18 +263,27 @@ type CardState = 'normal' | 'degraded' | 'down' | 'paused'
 const TYPE_OPTIONS = [
   { value: 'all', label: '全部' },
   { value: 'site', label: '站点' },
-  { value: 'api', label: 'AI官方' },
   { value: 'tracking', label: '埋点' },
-  { value: 'server', label: '服务器' },
-  { value: 'node', label: '节点' },
+  { value: 'port', label: '端口监控' },
   { value: 'subscription', label: '订阅' },
   { value: 'ai', label: 'AI中转站' },
-  { value: 'http', label: 'HTTP' },
-  { value: 'tcp', label: 'TCP' },
 ]
 
 const CREATE_TYPE_OPTIONS = TYPE_OPTIONS.filter((item) => item.value !== 'all')
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8080'
+
+function resolveAPIBase(): string {
+	const fromEnv = (import.meta.env.VITE_API_BASE as string | undefined)?.trim()
+	if (fromEnv) return fromEnv.replace(/\/+$/, '')
+	if (typeof window === 'undefined') return ''
+	const { hostname, port } = window.location
+	if (hostname === 'localhost' && /^51\d\d$/.test(port)) {
+		return 'http://localhost:8080'
+	}
+	return ''
+}
+
+const API_BASE = resolveAPIBase()
+const NODE_VIRTUAL_THRESHOLD = 800
 
 async function api<T>(path: string, options?: RequestInit, token?: string): Promise<T> {
   const headers = new Headers(options?.headers)
@@ -156,13 +299,18 @@ async function api<T>(path: string, options?: RequestInit, token?: string): Prom
     throw new Error(raw ? `服务返回异常响应：${raw.slice(0, 120)}` : `请求失败（HTTP ${res.status}）`)
   }
 
-  if (!body) {
-    throw new Error(`请求失败（HTTP ${res.status}）`)
-  }
+	if (!body) {
+		throw new Error(`请求失败（HTTP ${res.status}）`)
+	}
 
-  if (!res.ok || body.code !== 0) {
-    throw new Error(body.message || `请求失败（HTTP ${res.status}）`)
-  }
+	if (res.status === 401 || body.code === 40101 || body.code === 40102) {
+		localStorage.removeItem('all_monitor_token')
+		window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT))
+	}
+
+	if (!res.ok || body.code !== 0) {
+		throw new Error(body.message || `请求失败（HTTP ${res.status}）`)
+	}
   return body.data
 }
 
@@ -176,6 +324,33 @@ function formatAgo(timeString: string): string {
 function formatDateTime(timeString: string): string {
   const dt = new Date(timeString)
   return `${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}`
+}
+
+function isAuthExpiredMessage(message: string): boolean {
+	return message.includes('登录已失效')
+}
+
+function formatNextRun(lastTime?: string, intervalSec?: number, nowMs?: number): string {
+	if (!intervalSec || intervalSec <= 0) return '--'
+	const now = typeof nowMs === 'number' ? nowMs : Date.now()
+	const base = lastTime ? new Date(lastTime).getTime() : now
+	if (!Number.isFinite(base)) return '--'
+	const nextTs = base + intervalSec * 1000
+	const diff = nextTs - now
+	if (diff <= 0) {
+		const overdue = Math.abs(diff)
+		if (overdue <= 90_000) return '即将执行'
+		if (overdue < 3_600_000) return `调度延迟 ${Math.ceil(overdue / 60_000)} 分钟`
+		return `调度延迟 ${Math.ceil(overdue / 3_600_000)} 小时`
+	}
+	if (diff < 60_000) return `${Math.ceil(diff / 1000)} 秒后`
+	if (diff < 3_600_000) return `${Math.ceil(diff / 60_000)} 分钟后`
+	if (diff < 86_400_000) return `${Math.ceil(diff / 3_600_000)} 小时后`
+	return formatDateTime(new Date(nextTs).toISOString())
+}
+
+function getEffectiveCheckIntervalSec(target: Pick<Target, 'interval_sec'>): number {
+	return target.interval_sec
 }
 
 function summarizeUA(ua?: string): string {
@@ -302,8 +477,18 @@ function cardStateLabel(state: CardState): string {
 }
 
 function getTypeLabel(value: string): string {
+	if (value === 'http') return '站点'
+	if (value === 'api') return 'AI中转站'
+	if (value === 'tcp' || value === 'server' || value === 'node') return '端口监控'
 	const found = TYPE_OPTIONS.find((item) => item.value === value)
 	return found?.label ?? value
+}
+
+function normalizeType(value: string): string {
+	if (value === 'http') return 'site'
+	if (value === 'api') return 'ai'
+	if (value === 'tcp' || value === 'server' || value === 'node') return 'port'
+	return value
 }
 
 function readAPIKey(configJSON?: string): string {
@@ -361,6 +546,199 @@ function readTrackingConfig(configJSON?: string): TrackingConfig {
 	} catch {
 		return defaults
 	}
+}
+
+function readPortConfig(configJSON?: string): PortConfig {
+	const defaults: PortConfig = {
+		protocol: 'tcp',
+		udp_mode: 'send_only',
+		udp_payload: 'ping',
+		udp_expect: '',
+	}
+	if (!configJSON) return defaults
+	try {
+		const parsed = JSON.parse(configJSON) as {
+			protocol?: string
+			udp_mode?: string
+			udp_payload?: string
+			udp_expect?: string
+		}
+		return {
+			protocol: parsed.protocol === 'udp' ? 'udp' : 'tcp',
+			udp_mode: parsed.udp_mode === 'request_response' ? 'request_response' : 'send_only',
+			udp_payload: (parsed.udp_payload ?? 'ping').trim() || 'ping',
+			udp_expect: parsed.udp_expect ?? '',
+		}
+	} catch {
+		return defaults
+	}
+}
+
+function readSubscriptionConfig(configJSON?: string): SubscriptionConfig {
+	const defaults: SubscriptionConfig = {
+		latency_concurrency: 20,
+		latency_timeout_ms: 1200,
+		e2e_timeout_ms: 6000,
+		fetch_timeout_ms: 20000,
+		fetch_retries: 2,
+		fetch_proxy_url: '',
+		fetch_user_agent: DEFAULT_SUB_FETCH_UA,
+		fetch_cookie: '',
+		latency_probe_count: 3,
+		latency_interval_sec: 300,
+		weight_domestic: 0.3,
+		weight_overseas: 0.7,
+		probe_urls_domestic: ['https://connectivitycheck.platform.hicloud.com/generate_204', 'https://www.qq.com/favicon.ico'],
+		probe_urls_overseas: ['https://www.google.com/generate_204', 'https://cp.cloudflare.com/generate_204'],
+		singbox_path: 'sing-box',
+		manual_expire_at: '',
+	}
+	if (!configJSON) return defaults
+	try {
+		const parsed = JSON.parse(configJSON) as {
+			latency_concurrency?: number
+			latency_timeout_ms?: number
+			e2e_timeout_ms?: number
+			fetch_timeout_ms?: number
+			fetch_retries?: number
+			fetch_proxy_url?: string
+			fetch_user_agent?: string
+			fetch_cookie?: string
+			latency_probe_count?: number
+			latency_interval_sec?: number
+			weight_domestic?: number
+			weight_overseas?: number
+			probe_urls_domestic?: string[]
+			probe_urls_overseas?: string[]
+			singbox_path?: string
+			manual_expire_at?: string
+		}
+		const wd = typeof parsed.weight_domestic === 'number' && parsed.weight_domestic >= 0 ? parsed.weight_domestic : defaults.weight_domestic
+		const wo = typeof parsed.weight_overseas === 'number' && parsed.weight_overseas >= 0 ? parsed.weight_overseas : defaults.weight_overseas
+		const sum = wd + wo > 0 ? wd + wo : defaults.weight_domestic + defaults.weight_overseas
+		const normalizeURLs = (items: unknown, fallback: string[]) => {
+			if (!Array.isArray(items)) return fallback
+			const rows = items
+				.map((x) => String(x ?? '').trim())
+				.filter((x) => x.startsWith('http://') || x.startsWith('https://'))
+			return rows.length > 0 ? rows : fallback
+		}
+		const normalizeDateTimeLocal = (input: string): string => {
+			const raw = input.trim()
+			if (!raw) return ''
+			if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) return raw
+			const d = new Date(raw)
+			if (Number.isNaN(d.getTime())) return ''
+			const pad = (n: number) => String(n).padStart(2, '0')
+			return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+		}
+		return {
+			latency_concurrency: typeof parsed.latency_concurrency === 'number' && parsed.latency_concurrency > 0 ? parsed.latency_concurrency : 20,
+			latency_timeout_ms: typeof parsed.latency_timeout_ms === 'number' && parsed.latency_timeout_ms > 0 ? parsed.latency_timeout_ms : 1200,
+			e2e_timeout_ms: typeof parsed.e2e_timeout_ms === 'number' && parsed.e2e_timeout_ms > 0 ? parsed.e2e_timeout_ms : 6000,
+			fetch_timeout_ms: typeof parsed.fetch_timeout_ms === 'number' && parsed.fetch_timeout_ms > 0 ? parsed.fetch_timeout_ms : 20000,
+			fetch_retries: typeof parsed.fetch_retries === 'number' && parsed.fetch_retries >= 0 ? Math.min(5, parsed.fetch_retries) : 2,
+			fetch_proxy_url: (parsed.fetch_proxy_url ?? '').trim(),
+			fetch_user_agent: (parsed.fetch_user_agent ?? '').trim() || defaults.fetch_user_agent,
+			fetch_cookie: (parsed.fetch_cookie ?? '').trim(),
+			latency_probe_count: typeof parsed.latency_probe_count === 'number' && parsed.latency_probe_count > 0 ? parsed.latency_probe_count : 3,
+			latency_interval_sec: typeof parsed.latency_interval_sec === 'number' && parsed.latency_interval_sec > 0 ? parsed.latency_interval_sec : 300,
+			weight_domestic: wd / sum,
+			weight_overseas: wo / sum,
+			probe_urls_domestic: normalizeURLs(parsed.probe_urls_domestic, defaults.probe_urls_domestic),
+			probe_urls_overseas: normalizeURLs(parsed.probe_urls_overseas, defaults.probe_urls_overseas),
+			singbox_path: (parsed.singbox_path ?? '').trim() || defaults.singbox_path,
+			manual_expire_at: normalizeDateTimeLocal(parsed.manual_expire_at ?? ''),
+		}
+	} catch {
+		return defaults
+	}
+}
+
+function AutoGrowTextarea({
+	value,
+	onChange,
+	rows = 3,
+	placeholder,
+	className,
+}: {
+	value: string
+	onChange: (e: ChangeEvent<HTMLTextAreaElement>) => void
+	rows?: number
+	placeholder?: string
+	className?: string
+}) {
+	const ref = useRef<HTMLTextAreaElement | null>(null)
+
+	const resize = () => {
+		const el = ref.current
+		if (!el) return
+		el.style.height = 'auto'
+		el.style.height = `${el.scrollHeight}px`
+	}
+
+	useEffect(() => {
+		resize()
+	}, [value])
+
+	return (
+		<textarea
+			ref={ref}
+			rows={rows}
+			value={value}
+			onChange={onChange}
+			onInput={resize}
+			placeholder={placeholder}
+			className={className ? `auto-grow-textarea ${className}` : 'auto-grow-textarea'}
+		/>
+	)
+}
+
+function openDateTimePicker(input: HTMLInputElement) {
+	input.focus()
+	const pickerInput = input as HTMLInputElement & { showPicker?: () => void }
+	pickerInput.showPicker?.()
+}
+
+function formatBytes(val?: number): string {
+	if (!val || val <= 0) return '--'
+	const units = ['B', 'KB', 'MB', 'GB', 'TB']
+	let n = val
+	let i = 0
+	while (n >= 1024 && i < units.length - 1) {
+		n /= 1024
+		i += 1
+	}
+	return `${n.toFixed(i === 0 ? 0 : 1)}${units[i]}`
+}
+
+function latencyLevel(ms?: number): 'none' | 'fast' | 'good' | 'slow' | 'bad' {
+	if (typeof ms !== 'number' || ms < 0) return 'none'
+	if (ms < 80) return 'fast'
+	if (ms < 180) return 'good'
+	if (ms < 350) return 'slow'
+	return 'bad'
+}
+
+function nodeLatencyState(node: SubscriptionNode): 'pending' | 'degraded' | 'error' | 'fast' | 'good' | 'slow' | 'bad' {
+	if (typeof node.last_latency_ms === 'number' && node.last_latency_ms >= 0) {
+		return latencyLevel(node.last_latency_ms) as 'fast' | 'good' | 'slow' | 'bad'
+	}
+	const failStage = (node.last_fail_stage || '').toLowerCase()
+	const hasFailureSignal = Boolean((node.last_error_msg || '').trim() || (node.last_fail_reason || '').trim() || failStage)
+	if (hasFailureSignal) {
+		if (typeof node.last_tcp_ms === 'number' && node.last_tcp_ms > 0 && (failStage.includes('e2e') || failStage.includes('proxy') || failStage.includes('dns'))) {
+			return 'degraded'
+		}
+		return 'error'
+	}
+	if (node.last_latency_checked_at) {
+		if (typeof node.last_tcp_ms === 'number' && node.last_tcp_ms > 0) {
+			return 'degraded'
+		}
+		return 'error'
+	}
+	return 'pending'
 }
 
 function generateWriteKey(): string {
@@ -482,6 +860,7 @@ function DashboardPage({
   const [resultMap, setResultMap] = useState<Record<number, CheckResult[]>>({})
   const [financeMap, setFinanceMap] = useState<Record<number, FinanceSummary>>({})
   const [trackingMap, setTrackingMap] = useState<Record<number, TrackingSummary>>({})
+  const [subscriptionMap, setSubscriptionMap] = useState<Record<number, SubscriptionSummary>>({})
   const [error, setError] = useState('')
   const [creating, setCreating] = useState(false)
   const [checkingMap, setCheckingMap] = useState<Record<number, boolean>>({})
@@ -489,12 +868,33 @@ function DashboardPage({
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState('all')
   const [onlyAbnormal, setOnlyAbnormal] = useState(false)
-  const [createType, setCreateType] = useState('http')
+  const [createType, setCreateType] = useState('site')
   const [createAPIKey, setCreateAPIKey] = useState('')
+  const [createSubConcurrency, setCreateSubConcurrency] = useState(20)
+  const [createSubTimeoutMS, setCreateSubTimeoutMS] = useState(1200)
+  const [createSubE2ETimeoutMS, setCreateSubE2ETimeoutMS] = useState(6000)
+  const [createSubFetchTimeoutMS, setCreateSubFetchTimeoutMS] = useState(20000)
+  const [createSubFetchRetries, setCreateSubFetchRetries] = useState(2)
+  const [createSubFetchProxyURL, setCreateSubFetchProxyURL] = useState('')
+  const [createSubFetchUA, setCreateSubFetchUA] = useState(DEFAULT_SUB_FETCH_UA)
+  const [createSubFetchCookie, setCreateSubFetchCookie] = useState('')
+  const [createSubProbeCount, setCreateSubProbeCount] = useState(3)
+  const [createSubIntervalSec, setCreateSubIntervalSec] = useState(300)
+  const [createSubWeightDomestic, setCreateSubWeightDomestic] = useState(0.3)
+  const [createSubWeightOverseas, setCreateSubWeightOverseas] = useState(0.7)
+  const [createSubURLsDomestic, setCreateSubURLsDomestic] = useState('https://connectivitycheck.platform.hicloud.com/generate_204\nhttps://www.qq.com/favicon.ico')
+  const [createSubURLsOverseas, setCreateSubURLsOverseas] = useState('https://www.google.com/generate_204\nhttps://cp.cloudflare.com/generate_204')
+  const [createSingBoxPath, setCreateSingBoxPath] = useState('sing-box')
+  const [createSubManualExpireAt, setCreateSubManualExpireAt] = useState('')
+  const [createPortProtocol, setCreatePortProtocol] = useState<PortProtocol>('tcp')
+  const [createUDPMode, setCreateUDPMode] = useState<UDPMode>('send_only')
+  const [createUDPPayload, setCreateUDPPayload] = useState('ping')
+  const [createUDPExpect, setCreateUDPExpect] = useState('')
   const [createMetricMode, setCreateMetricMode] = useState<TrackingMetricMode>('both')
   const [createUVIdentity, setCreateUVIdentity] = useState<UVIdentity>('client_id')
   const [createInactiveThreshold, setCreateInactiveThreshold] = useState(0)
   const [createWriteKey, setCreateWriteKey] = useState(() => generateWriteKey())
+  const [nowTick, setNowTick] = useState(() => Date.now())
 
   async function loadDashboard() {
     setError('')
@@ -534,6 +934,19 @@ function DashboardPage({
 		  }),
 	  )
 	  setTrackingMap(Object.fromEntries(trackingEntries))
+
+	  const subscriptionTargets = targetsData.filter((target) => target.type === 'subscription')
+	  const subscriptionEntries = await Promise.all(
+		subscriptionTargets.map(async (target) => {
+		  try {
+			const summary = await api<SubscriptionSummary>(`/api/targets/${target.id}/subscription/summary`, undefined, token)
+			return [target.id, summary] as const
+		  } catch {
+			return [target.id, { has_data: false }] as const
+		  }
+		}),
+	  )
+	  setSubscriptionMap(Object.fromEntries(subscriptionEntries))
     } catch (e) {
       setError((e as Error).message)
     }
@@ -541,6 +954,18 @@ function DashboardPage({
 
   useEffect(() => {
     void loadDashboard()
+  }, [])
+
+  useEffect(() => {
+	const timer = window.setInterval(() => {
+		void loadDashboard()
+	}, 30_000)
+	return () => window.clearInterval(timer)
+  }, [token])
+
+  useEffect(() => {
+	const timer = window.setInterval(() => setNowTick(Date.now()), 1000)
+	return () => window.clearInterval(timer)
   }, [])
 
   async function handleCheckNow(id: number) {
@@ -563,11 +988,37 @@ function DashboardPage({
       name: String(form.get('name') ?? ''),
       type: createType,
       endpoint: createType === 'tracking' ? 'tracking://ingest' : String(form.get('endpoint') ?? ''),
-      interval_sec: createType === 'tracking' ? 60 : Number(form.get('interval_sec') ?? 60),
+	  interval_sec: createType === 'tracking' ? 60 : (createType === 'subscription' ? Number(form.get('interval_sec') ?? 0) : Number(form.get('interval_sec') ?? 60)),
       timeout_ms: createType === 'tracking' ? 5000 : Number(form.get('timeout_ms') ?? 5000),
       enabled: true,
-      config_json: (createType === 'ai' || createType === 'api')
+	  config_json: createType === 'ai'
 		? JSON.stringify({ api_key: createAPIKey.trim() })
+		: (createType === 'subscription'
+			? JSON.stringify({
+				latency_concurrency: createSubConcurrency,
+				latency_timeout_ms: createSubTimeoutMS,
+				e2e_timeout_ms: createSubE2ETimeoutMS,
+				fetch_timeout_ms: createSubFetchTimeoutMS,
+				fetch_retries: createSubFetchRetries,
+				fetch_proxy_url: createSubFetchProxyURL.trim(),
+				fetch_user_agent: createSubFetchUA.trim() || DEFAULT_SUB_FETCH_UA,
+				fetch_cookie: createSubFetchCookie.trim(),
+				latency_probe_count: createSubProbeCount,
+				latency_interval_sec: createSubIntervalSec,
+				weight_domestic: createSubWeightDomestic,
+				weight_overseas: createSubWeightOverseas,
+				probe_urls_domestic: createSubURLsDomestic.split('\n').map((x) => x.trim()).filter(Boolean),
+				probe_urls_overseas: createSubURLsOverseas.split('\n').map((x) => x.trim()).filter(Boolean),
+				singbox_path: createSingBoxPath.trim() || 'sing-box',
+				manual_expire_at: createSubManualExpireAt.trim(),
+			})
+		: (createType === 'port'
+			? JSON.stringify({
+				protocol: createPortProtocol,
+				udp_mode: createUDPMode,
+				udp_payload: createUDPPayload.trim() || 'ping',
+				udp_expect: createUDPExpect.trim(),
+			})
 		: (createType === 'tracking'
 			? JSON.stringify({
 				write_key: createWriteKey,
@@ -576,15 +1027,47 @@ function DashboardPage({
 				user_group_mode: 'ip_device',
 				inactive_threshold_min: createInactiveThreshold,
 			})
-			: '{}'),
+			: '{}'))),
     }
 
-	if ((createType === 'ai' || createType === 'api') && !createAPIKey.trim()) {
-		setError('AI中转站/AI官方类型必须填写 API Key')
+	if (createType === 'ai' && !createAPIKey.trim()) {
+		setError('AI中转站类型必须填写 API Key')
 		return
 	}
 	if (createType === 'tracking' && !createWriteKey.trim()) {
 		setError('埋点类型必须填写 write key')
+		return
+	}
+	if (createType === 'subscription' && createSubConcurrency <= 0) {
+		setError('订阅测速并发必须大于 0')
+		return
+	}
+	if (createType === 'subscription' && createSubProbeCount <= 0) {
+		setError('单节点探测次数必须大于 0')
+		return
+	}
+	if (createType === 'subscription' && createSubE2ETimeoutMS <= 0) {
+		setError('E2E 超时必须大于 0')
+		return
+	}
+	if (createType === 'subscription' && createSubFetchTimeoutMS <= 0) {
+		setError('订阅拉取超时必须大于 0')
+		return
+	}
+	if (createType === 'subscription' && createSubFetchRetries < 0) {
+		setError('订阅拉取重试次数不能小于 0')
+		return
+	}
+	if (createType === 'subscription' && createSubIntervalSec <= 0) {
+		setError('自动测速间隔必须大于 0')
+		return
+	}
+	if (createType === 'subscription' && (createSubWeightDomestic < 0 || createSubWeightOverseas < 0 || (createSubWeightDomestic + createSubWeightOverseas) <= 0)) {
+		setError('国内/海外权重需大于等于0且总和大于0')
+		return
+	}
+	if (createType === 'port' && createPortProtocol === 'udp' && createUDPMode === 'request_response' && !createUDPExpect.trim()) {
+		setError('UDP 校验回包模式下请填写期望回包')
 		return
 	}
 	if (createType !== 'tracking' && !String(form.get('endpoint') ?? '').trim()) {
@@ -596,16 +1079,36 @@ function DashboardPage({
     try {
       await api('/api/targets', { method: 'POST', body: JSON.stringify(payload) }, token)
       formEl.reset()
-      setCreateType('http')
+	  setCreateType('site')
 	  setCreateAPIKey('')
+	  setCreateSubConcurrency(20)
+	  setCreateSubTimeoutMS(1200)
+	  setCreateSubE2ETimeoutMS(6000)
+	  setCreateSubFetchTimeoutMS(20000)
+	  setCreateSubFetchRetries(2)
+	  setCreateSubFetchProxyURL('')
+	  setCreateSubFetchUA(DEFAULT_SUB_FETCH_UA)
+	  setCreateSubFetchCookie('')
+	  setCreateSubProbeCount(3)
+	  setCreateSubIntervalSec(300)
+	  setCreateSubWeightDomestic(0.3)
+	  setCreateSubWeightOverseas(0.7)
+	  setCreateSubURLsDomestic('https://connectivitycheck.platform.hicloud.com/generate_204\nhttps://www.qq.com/favicon.ico')
+	  setCreateSubURLsOverseas('https://www.google.com/generate_204\nhttps://cp.cloudflare.com/generate_204')
+	  setCreateSingBoxPath('sing-box')
+	  setCreateSubManualExpireAt('')
+	  setCreatePortProtocol('tcp')
+	  setCreateUDPMode('send_only')
+	  setCreateUDPPayload('ping')
+	  setCreateUDPExpect('')
 	  setCreateMetricMode('both')
 	  setCreateUVIdentity('client_id')
 	  setCreateInactiveThreshold(0)
 	  setCreateWriteKey(generateWriteKey())
-      await loadDashboard()
-    } catch (err) {
-      setError((err as Error).message)
-    } finally {
+	  void loadDashboard()
+	} catch (err) {
+	  setError((err as Error).message)
+	} finally {
       setCreating(false)
     }
   }
@@ -632,7 +1135,12 @@ function DashboardPage({
   const filteredTargets = useMemo(() => {
     return targets.filter((item) => {
       const hitKeyword = !search.trim() || `${item.name} ${item.endpoint}`.toLowerCase().includes(search.toLowerCase())
-      const hitType = typeFilter === 'all' || item.type === typeFilter
+      const hitType =
+		typeFilter === 'all' ||
+		item.type === typeFilter ||
+		(typeFilter === 'site' && item.type === 'http') ||
+		(typeFilter === 'ai' && item.type === 'api') ||
+		(typeFilter === 'port' && (item.type === 'tcp' || item.type === 'server' || item.type === 'node'))
       const state = getCardState(item, resultMap[item.id] ?? [], trackingMap[item.id])
       const hitAbnormal = !onlyAbnormal || state === 'down' || state === 'degraded'
       return hitKeyword && hitType && hitAbnormal
@@ -642,7 +1150,7 @@ function DashboardPage({
   return (
     <div className="workspace">
       <header className="workspace-header">
-        <div>
+		<div className="header-main">
           <p className="muted">源梦监控</p>
           <h1>监控工作台</h1>
         </div>
@@ -704,10 +1212,16 @@ function DashboardPage({
                     key={item.value}
                     type="button"
                     className={`chip ${createType === item.value ? 'active' : ''}`}
-                    onClick={() => {
+					onClick={() => {
 					  setCreateType(item.value)
 					  if (item.value === 'tracking') {
 						  setCreateWriteKey(generateWriteKey())
+					  }
+					  if (item.value === 'port') {
+						  setCreatePortProtocol('tcp')
+						  setCreateUDPMode('send_only')
+						  setCreateUDPPayload('ping')
+						  setCreateUDPExpect('')
 					  }
 					}}
                     aria-pressed={createType === item.value}
@@ -720,10 +1234,42 @@ function DashboardPage({
 			{createType !== 'tracking' ? (
 			  <label>
 				地址
-				<input name="endpoint" placeholder="https://example.com/health 或 1.2.3.4:443" required />
+				<input name="endpoint" placeholder={createType === 'port' ? '127.0.0.1:6379' : 'https://example.com/health 或 1.2.3.4:443'} required />
 			  </label>
 			) : null}
-			{createType === 'ai' || createType === 'api' ? (
+			{createType === 'port' ? (
+			  <>
+				<label>
+				  协议
+				  <div className="type-chips">
+					<button type="button" className={`chip ${createPortProtocol === 'tcp' ? 'active' : ''}`} onClick={() => setCreatePortProtocol('tcp')}>TCP</button>
+					<button type="button" className={`chip ${createPortProtocol === 'udp' ? 'active' : ''}`} onClick={() => setCreatePortProtocol('udp')}>UDP</button>
+				  </div>
+				</label>
+				{createPortProtocol === 'udp' ? (
+				  <>
+					<label>
+					  UDP 模式
+					  <div className="type-chips">
+						<button type="button" className={`chip ${createUDPMode === 'send_only' ? 'active' : ''}`} onClick={() => setCreateUDPMode('send_only')}>仅发送</button>
+						<button type="button" className={`chip ${createUDPMode === 'request_response' ? 'active' : ''}`} onClick={() => setCreateUDPMode('request_response')}>发送并校验回包</button>
+					  </div>
+					</label>
+					<label>
+					  UDP 发送内容
+					  <input value={createUDPPayload} onChange={(e) => setCreateUDPPayload(e.target.value)} placeholder="ping" />
+					</label>
+					{createUDPMode === 'request_response' ? (
+					  <label>
+						期望回包（包含）
+						<input value={createUDPExpect} onChange={(e) => setCreateUDPExpect(e.target.value)} placeholder="pong" required />
+					  </label>
+					) : null}
+				  </>
+				) : null}
+			  </>
+			) : null}
+			{createType === 'ai' ? (
 			  <label>
 				API Key
 				<input
@@ -734,6 +1280,82 @@ function DashboardPage({
 				  required
 				/>
 			  </label>
+			) : null}
+			{createType === 'subscription' ? (
+			  <>
+			  <div className="form-row">
+				<label>
+				  测速并发（大于等于1）
+				  <input type="number" min={1} value={createSubConcurrency} onChange={(e) => setCreateSubConcurrency(Number(e.target.value) || 1)} required />
+				</label>
+				<label>
+				  测速超时(ms)
+				  <input type="number" min={100} value={createSubTimeoutMS} onChange={(e) => setCreateSubTimeoutMS(Number(e.target.value) || 1200)} required />
+				</label>
+				<label>
+				  E2E超时(ms)
+				  <input type="number" min={500} value={createSubE2ETimeoutMS} onChange={(e) => setCreateSubE2ETimeoutMS(Number(e.target.value) || 6000)} required />
+				</label>
+				<label>
+				  订阅拉取超时(ms)
+				  <input type="number" min={1000} value={createSubFetchTimeoutMS} onChange={(e) => setCreateSubFetchTimeoutMS(Number(e.target.value) || 20000)} required />
+				</label>
+				<label>
+				  拉取重试次数
+				  <input type="number" min={0} max={5} value={createSubFetchRetries} onChange={(e) => setCreateSubFetchRetries(Math.max(0, Math.min(5, Number(e.target.value) || 0)))} required />
+				</label>
+				<label>
+				  单节点探测次数
+				  <input type="number" min={1} value={createSubProbeCount} onChange={(e) => setCreateSubProbeCount(Number(e.target.value) || 3)} required />
+				</label>
+				<label>
+				  自动测速间隔(秒)
+				  <input type="number" min={10} value={createSubIntervalSec} onChange={(e) => setCreateSubIntervalSec(Number(e.target.value) || 300)} required />
+				</label>
+				<label>
+				  国内权重
+				  <input type="number" min={0} step="0.1" value={createSubWeightDomestic} onChange={(e) => setCreateSubWeightDomestic(Math.max(0, Number(e.target.value) || 0))} required />
+				</label>
+				<label>
+				  海外权重
+				  <input type="number" min={0} step="0.1" value={createSubWeightOverseas} onChange={(e) => setCreateSubWeightOverseas(Math.max(0, Number(e.target.value) || 0))} required />
+				</label>
+			  </div>
+			  <label>
+				国内测速URL（每行一个）
+				<AutoGrowTextarea value={createSubURLsDomestic} onChange={(e) => setCreateSubURLsDomestic(e.target.value)} rows={3} />
+			  </label>
+			  <label>
+				海外测速URL（每行一个）
+				<AutoGrowTextarea value={createSubURLsOverseas} onChange={(e) => setCreateSubURLsOverseas(e.target.value)} rows={3} />
+			  </label>
+			  <label>
+				sing-box 路径
+				<input value={createSingBoxPath} onChange={(e) => setCreateSingBoxPath(e.target.value)} placeholder="sing-box" />
+			  </label>
+			  <label>
+				订阅拉取代理（可选）
+				<input value={createSubFetchProxyURL} onChange={(e) => setCreateSubFetchProxyURL(e.target.value)} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />
+			  </label>
+			  <label>
+				订阅拉取 UA
+				<input value={createSubFetchUA} onChange={(e) => setCreateSubFetchUA(e.target.value)} placeholder={DEFAULT_SUB_FETCH_UA} />
+			  </label>
+			  <label>
+				订阅拉取 Cookie（可选）
+				<AutoGrowTextarea value={createSubFetchCookie} onChange={(e) => setCreateSubFetchCookie(e.target.value)} rows={2} />
+			  </label>
+			  <label>
+				手动到期时间（可选）
+				<input
+					type="datetime-local"
+					value={createSubManualExpireAt}
+					onChange={(e) => setCreateSubManualExpireAt(e.target.value)}
+					onClick={(e) => openDateTimePicker(e.currentTarget)}
+					onFocus={(e) => openDateTimePicker(e.currentTarget)}
+				/>
+			  </label>
+			  </>
 			) : null}
 			{createType === 'tracking' ? (
 			  <>
@@ -803,7 +1425,7 @@ function DashboardPage({
 			  <div className="form-row">
 				<label>
 				  间隔(秒)
-				  <input name="interval_sec" type="number" defaultValue={60} min={10} required />
+				  <input key={`interval-${createType}`} name="interval_sec" type="number" defaultValue={createType === 'subscription' ? 0 : 60} min={createType === 'subscription' ? 0 : 10} required />
 				</label>
 				<label>
 				  超时(ms)
@@ -818,13 +1440,21 @@ function DashboardPage({
         </article>
 
         <div className="card-grid">
-          {filteredTargets.map((target) => {
-            const rows = resultMap[target.id] ?? []
-            const finance = financeMap[target.id]
-            const tracking = trackingMap[target.id]
-            const trackingStatus = target.type === 'tracking' ? getTrackingStatusInfo(target, tracking) : null
-            const latest = rows[0]
-            const state = getCardState(target, rows, tracking)
+		  {filteredTargets.map((target) => {
+			const rows = resultMap[target.id] ?? []
+			const finance = financeMap[target.id]
+			const tracking = trackingMap[target.id]
+			const subscription = subscriptionMap[target.id]
+			const subscriptionConfig = target.type === 'subscription' ? readSubscriptionConfig(target.config_json) : null
+			const cardExpireAt = subscription?.expire_at || subscriptionConfig?.manual_expire_at || ''
+			const trackingStatus = target.type === 'tracking' ? getTrackingStatusInfo(target, tracking) : null
+			const latest = rows[0]
+			const lastRunAt = target.type === 'tracking'
+				? tracking?.last_event_at
+				: latest?.checked_at
+			const nextRunInterval = getEffectiveCheckIntervalSec(target)
+			const nextRunText = target.type === 'tracking' ? '--' : formatNextRun(lastRunAt, nextRunInterval, nowTick)
+			const state = getCardState(target, rows, tracking)
             const successRows = rows.filter((x) => x.success)
             const uptime = rows.length > 0 ? (successRows.length / rows.length) * 100 : 0
             const avgLatency = successRows.length > 0
@@ -838,9 +1468,9 @@ function DashboardPage({
                 key={target.id}
                 onClick={() => navigate(`/targets/${target.id}`)}
               >
-                <div className="card-head">
-                  <div>
-                    <h3>{target.name}</h3>
+				<div className="card-head">
+				  <div className="card-head-main">
+					<h3>{target.name}</h3>
 					{target.type !== 'tracking' ? (
 					  <a
 						className="endpoint-link"
@@ -916,6 +1546,21 @@ function DashboardPage({
 					  <strong>{tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '--'}</strong>
 					</div>
 				  </div>
+				) : target.type === 'subscription' ? (
+				  <div className="metrics">
+					<div>
+					  <p className="muted">节点状态</p>
+					  <strong>{subscription?.has_data ? `${subscription.available_total ?? 0}/${subscription.node_total ?? 0}` : '--'}</strong>
+					</div>
+					<div>
+					  <p className="muted">剩余流量</p>
+					  <strong>{subscription?.has_data ? formatBytes(subscription.remaining_bytes) : '--'}</strong>
+					</div>
+					<div>
+					  <p className="muted">到期时间</p>
+					  <strong>{cardExpireAt ? formatDateTime(cardExpireAt) : '--'}</strong>
+					</div>
+				  </div>
 				) : (
 				  <div className="metrics">
 					<div>
@@ -946,7 +1591,7 @@ function DashboardPage({
 				  </div>
 				) : null}
 
-				{target.type !== 'tracking' ? (
+				{target.type !== 'tracking' && target.type !== 'subscription' ? (
 				<div className="uptime-wrap">
 				  <p className="muted">全天在线情况</p>
 				  <div className="uptime-bar" aria-label="全天在线状态条">
@@ -959,17 +1604,22 @@ function DashboardPage({
                     ))}
 				  </div>
 				</div>
-				) : (
+				) : target.type === 'tracking' ? (
 				  <p className="muted">最近事件：{tracking?.last_event_name || '-'}</p>
+				) : (
+				  <p className="muted">订阅状态：{subscription?.reachable ? '可访问' : (subscription?.error_msg || '待检测')}</p>
 				)}
 
-                <div className="card-actions">
+				<div className="card-actions">
 				  <span className="muted">
 					{target.type === 'tracking'
 					  ? `最后上报：${tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '暂无'}`
-					  : `最后检测：${latest ? formatAgo(latest.checked_at) : '暂无'}`}
+					  : (target.type === 'subscription'
+						  ? `最近拉取：${subscription?.last_checked_at ? formatAgo(subscription.last_checked_at) : '暂无'}`
+						  : `最后检测：${latest ? formatAgo(latest.checked_at) : '暂无'}`)}
 				  </span>
-                </div>
+				  {target.type !== 'tracking' ? <span className="muted">下次检测：{nextRunText}</span> : null}
+				</div>
               </article>
             )
           })}
@@ -991,6 +1641,15 @@ function TargetDetailPage({ token }: { token: string }) {
   const [trackingSummary, setTrackingSummary] = useState<TrackingSummary | null>(null)
   const [trackingEvents, setTrackingEvents] = useState<TrackingEvent[]>([])
   const [trackingSeries, setTrackingSeries] = useState<TrackingSeriesPoint[]>([])
+  const [subscriptionSummary, setSubscriptionSummary] = useState<SubscriptionSummary | null>(null)
+  const [subscriptionNodes, setSubscriptionNodes] = useState<SubscriptionNode[]>([])
+  const [subscriptionSort, setSubscriptionSort] = useState<'source' | 'latency' | 'name'>('source')
+  const [subscriptionSearch, setSubscriptionSearch] = useState('')
+  const [refreshingLatency, setRefreshingLatency] = useState(false)
+  const [refreshingNodeMap, setRefreshingNodeMap] = useState<Record<string, boolean>>({})
+  const [latencyJobProgress, setLatencyJobProgress] = useState<SubscriptionLatencyJobStatus | null>(null)
+  const [subscriptionRenderCount, setSubscriptionRenderCount] = useState(400)
+  const [nowTick, setNowTick] = useState(() => Date.now())
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [checking, setChecking] = useState(false)
@@ -1025,7 +1684,7 @@ function TargetDetailPage({ token }: { token: string }) {
   }), [])
   const [editForm, setEditForm] = useState({
     name: '',
-    type: 'http',
+    type: 'site',
     endpoint: '',
     interval_sec: 60,
     timeout_ms: 5000,
@@ -1036,6 +1695,26 @@ function TargetDetailPage({ token }: { token: string }) {
 	uv_identity: 'client_id' as UVIdentity,
 	user_group_mode: 'ip_device' as UserGroupMode,
 	inactive_threshold_min: 0,
+	protocol: 'tcp' as PortProtocol,
+	udp_mode: 'send_only' as UDPMode,
+	udp_payload: 'ping',
+	udp_expect: '',
+	latency_concurrency: 20,
+	latency_timeout_ms: 1200,
+	e2e_timeout_ms: 6000,
+	fetch_timeout_ms: 20000,
+	fetch_retries: 2,
+	fetch_proxy_url: '',
+	fetch_user_agent: DEFAULT_SUB_FETCH_UA,
+	fetch_cookie: '',
+	latency_probe_count: 3,
+	latency_interval_sec: 300,
+	weight_domestic: 0.3,
+	weight_overseas: 0.7,
+	probe_urls_domestic_text: 'https://connectivitycheck.platform.hicloud.com/generate_204\nhttps://www.qq.com/favicon.ico',
+	probe_urls_overseas_text: 'https://www.google.com/generate_204\nhttps://cp.cloudflare.com/generate_204',
+	singbox_path: 'sing-box',
+	manual_expire_at: '',
   })
 
   async function loadDetail() {
@@ -1050,14 +1729,20 @@ function TargetDetailPage({ token }: { token: string }) {
       setTarget(targetData)
       setEditForm({
         name: targetData.name,
-        type: targetData.type,
+		type: normalizeType(targetData.type),
         endpoint: targetData.endpoint,
         interval_sec: targetData.interval_sec,
         timeout_ms: targetData.timeout_ms,
         enabled: targetData.enabled,
         api_key: readAPIKey(targetData.config_json),
 		...readTrackingConfig(targetData.config_json),
-      })
+		...readPortConfig(targetData.config_json),
+		...readSubscriptionConfig(targetData.config_json),
+		probe_urls_domestic_text: readSubscriptionConfig(targetData.config_json).probe_urls_domestic.join('\n'),
+		probe_urls_overseas_text: readSubscriptionConfig(targetData.config_json).probe_urls_overseas.join('\n'),
+		singbox_path: readSubscriptionConfig(targetData.config_json).singbox_path,
+		manual_expire_at: readSubscriptionConfig(targetData.config_json).manual_expire_at,
+	  })
       setResults(rows)
 	  if (targetData.type === 'ai' || targetData.type === 'api') {
 		const financeSummary = await api<FinanceSummary>(`/api/targets/${id}/finance`, undefined, token)
@@ -1065,6 +1750,8 @@ function TargetDetailPage({ token }: { token: string }) {
 		setTrackingSummary(null)
 		setTrackingEvents([])
 		setTrackingSeries([])
+		setSubscriptionSummary(null)
+		setSubscriptionNodes([])
 	  } else if (targetData.type === 'tracking') {
 		const [summary, events, series] = await Promise.all([
 			api<TrackingSummary>(`/api/targets/${id}/tracking/summary?hours=24`, undefined, token).catch((err) => {
@@ -1084,11 +1771,26 @@ function TargetDetailPage({ token }: { token: string }) {
 		setTrackingEvents(events)
 		setTrackingSeries(series)
 		setFinance(null)
+		setSubscriptionSummary(null)
+		setSubscriptionNodes([])
+	  } else if (targetData.type === 'subscription') {
+		const [summary, nodes] = await Promise.all([
+			api<SubscriptionSummary>(`/api/targets/${id}/subscription/summary`, undefined, token),
+			api<SubscriptionNode[]>(`/api/targets/${id}/subscription/nodes?sort=${subscriptionSort}&search=${encodeURIComponent(subscriptionSearch)}`, undefined, token),
+		])
+		setSubscriptionSummary(summary)
+		setSubscriptionNodes(nodes)
+		setFinance(null)
+		setTrackingSummary(null)
+		setTrackingEvents([])
+		setTrackingSeries([])
 	  } else {
 		setFinance(null)
 		setTrackingSummary(null)
 		setTrackingEvents([])
 		setTrackingSeries([])
+		setSubscriptionSummary(null)
+		setSubscriptionNodes([])
 	  }
     } catch (err) {
       setError((err as Error).message)
@@ -1100,6 +1802,19 @@ function TargetDetailPage({ token }: { token: string }) {
   useEffect(() => {
     void loadDetail()
   }, [id])
+
+  useEffect(() => {
+	if (editing || saving || deleting) return
+	const timer = window.setInterval(() => {
+		void loadDetail()
+	}, 30_000)
+	return () => window.clearInterval(timer)
+  }, [id, token, rangePreset, subscriptionSort, subscriptionSearch, editing, saving, deleting])
+
+  useEffect(() => {
+	const timer = window.setInterval(() => setNowTick(Date.now()), 1000)
+	return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
 	if (!Number.isFinite(id) || id <= 0) return
@@ -1123,6 +1838,39 @@ function TargetDetailPage({ token }: { token: string }) {
 	  })
   }, [id, target?.type, rangePreset, token])
 
+  useEffect(() => {
+	if (!Number.isFinite(id) || id <= 0) return
+	if (target?.type !== 'subscription') return
+	setRefreshingLatency(false)
+	setRefreshingNodeMap({})
+	setLatencyJobProgress(null)
+	void loadSubscriptionNodes().catch((err) => setError((err as Error).message))
+  }, [id, target?.type, subscriptionSort, subscriptionSearch, token])
+
+  useEffect(() => {
+	if (subscriptionNodes.length <= NODE_VIRTUAL_THRESHOLD) {
+		setSubscriptionRenderCount(subscriptionNodes.length)
+		return
+	}
+	setSubscriptionRenderCount(400)
+	let cancelled = false
+	const step = () => {
+		if (cancelled) return
+		setSubscriptionRenderCount((prev) => {
+			if (prev >= subscriptionNodes.length) return prev
+			const next = Math.min(prev + 400, subscriptionNodes.length)
+			if (next < subscriptionNodes.length) {
+				setTimeout(step, 16)
+			}
+			return next
+		})
+	}
+	setTimeout(step, 16)
+	return () => {
+		cancelled = true
+	}
+  }, [subscriptionNodes])
+
   async function handleCheckNow() {
     if (!Number.isFinite(id) || id <= 0) return
     setChecking(true)
@@ -1139,24 +1887,84 @@ function TargetDetailPage({ token }: { token: string }) {
   async function handleSaveConfig(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
     if (!Number.isFinite(id) || id <= 0) return
-	if ((editForm.type === 'ai' || editForm.type === 'api') && !editForm.api_key.trim()) {
-		setError('AI中转站/AI官方类型必须填写 API Key')
+	if (editForm.type === 'ai' && !editForm.api_key.trim()) {
+		setError('AI中转站类型必须填写 API Key')
 		return
 	}
 	if (editForm.type === 'tracking' && !editForm.write_key.trim()) {
 		setError('埋点类型必须填写 write key')
 		return
 	}
+	if (editForm.type === 'subscription' && editForm.latency_concurrency <= 0) {
+		setError('订阅测速并发必须大于 0')
+		return
+	}
+	if (editForm.type === 'subscription' && editForm.latency_probe_count <= 0) {
+		setError('单节点探测次数必须大于 0')
+		return
+	}
+	if (editForm.type === 'subscription' && editForm.e2e_timeout_ms <= 0) {
+		setError('E2E 超时必须大于 0')
+		return
+	}
+	if (editForm.type === 'subscription' && editForm.fetch_timeout_ms <= 0) {
+		setError('订阅拉取超时必须大于 0')
+		return
+	}
+	if (editForm.type === 'subscription' && editForm.fetch_retries < 0) {
+		setError('订阅拉取重试次数不能小于 0')
+		return
+	}
+	if (editForm.type === 'subscription' && editForm.latency_interval_sec <= 0) {
+		setError('自动测速间隔必须大于 0')
+		return
+	}
+	if (editForm.type === 'subscription' && (editForm.weight_domestic < 0 || editForm.weight_overseas < 0 || (editForm.weight_domestic + editForm.weight_overseas) <= 0)) {
+		setError('国内/海外权重需大于等于0且总和大于0')
+		return
+	}
+	if (editForm.type === 'port' && editForm.protocol === 'udp' && editForm.udp_mode === 'request_response' && !editForm.udp_expect.trim()) {
+		setError('UDP 校验回包模式下请填写期望回包')
+		return
+	}
     setSaving(true)
     try {
+	  const normalizedType = normalizeType(editForm.type)
 	  const payload = {
 		...editForm,
-		endpoint: editForm.type === 'tracking' ? 'tracking://ingest' : editForm.endpoint,
-		interval_sec: editForm.type === 'tracking' ? 60 : editForm.interval_sec,
-		timeout_ms: editForm.type === 'tracking' ? 5000 : editForm.timeout_ms,
-		config_json: (editForm.type === 'ai' || editForm.type === 'api')
+		type: normalizedType,
+		endpoint: normalizedType === 'tracking' ? 'tracking://ingest' : editForm.endpoint,
+		interval_sec: normalizedType === 'tracking' ? 60 : editForm.interval_sec,
+		timeout_ms: normalizedType === 'tracking' ? 5000 : editForm.timeout_ms,
+		config_json: normalizedType === 'ai'
 		  ? JSON.stringify({ api_key: editForm.api_key.trim() })
-		  : (editForm.type === 'tracking'
+		  : (normalizedType === 'subscription'
+			  ? JSON.stringify({
+				  latency_concurrency: editForm.latency_concurrency,
+				  latency_timeout_ms: editForm.latency_timeout_ms,
+				  e2e_timeout_ms: editForm.e2e_timeout_ms,
+				  fetch_timeout_ms: editForm.fetch_timeout_ms,
+				  fetch_retries: editForm.fetch_retries,
+				  fetch_proxy_url: editForm.fetch_proxy_url.trim(),
+				  fetch_user_agent: editForm.fetch_user_agent.trim() || DEFAULT_SUB_FETCH_UA,
+				  fetch_cookie: editForm.fetch_cookie.trim(),
+				  latency_probe_count: editForm.latency_probe_count,
+				  latency_interval_sec: editForm.latency_interval_sec,
+				  weight_domestic: editForm.weight_domestic,
+				  weight_overseas: editForm.weight_overseas,
+				  probe_urls_domestic: editForm.probe_urls_domestic_text.split('\n').map((x) => x.trim()).filter(Boolean),
+				  probe_urls_overseas: editForm.probe_urls_overseas_text.split('\n').map((x) => x.trim()).filter(Boolean),
+				  singbox_path: editForm.singbox_path.trim() || 'sing-box',
+				  manual_expire_at: editForm.manual_expire_at.trim(),
+			  })
+			  : (normalizedType === 'port'
+			  ? JSON.stringify({
+				  protocol: editForm.protocol,
+				  udp_mode: editForm.udp_mode,
+				  udp_payload: editForm.udp_payload.trim() || 'ping',
+				  udp_expect: editForm.udp_expect.trim(),
+			  })
+			  : (normalizedType === 'tracking'
 			  ? JSON.stringify({
 				  write_key: editForm.write_key.trim(),
 				  metric_mode: editForm.metric_mode,
@@ -1164,7 +1972,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  user_group_mode: editForm.user_group_mode,
 				  inactive_threshold_min: editForm.inactive_threshold_min,
 			  })
-			  : '{}'),
+			  : '{}'))),
 	  }
       await api(`/api/targets/${id}`, {
         method: 'PUT',
@@ -1258,7 +2066,16 @@ function TargetDetailPage({ token }: { token: string }) {
   }, [windowedTrackingEvents, rangePreset, trackingSeries])
 
   const isTrackingTarget = target?.type === 'tracking'
+  const isSubscriptionTarget = target?.type === 'subscription'
   const trackingConfig = useMemo(() => readTrackingConfig(target?.config_json), [target?.config_json])
+  const subscriptionConfig = useMemo(() => readSubscriptionConfig(target?.config_json), [target?.config_json])
+  const detailLastRunAt = isTrackingTarget
+	? trackingSummary?.last_event_at
+	: latest?.checked_at
+  const detailIntervalSec = target ? getEffectiveCheckIntervalSec(target) : 0
+  const detailNextRun = target && target.type !== 'tracking'
+	? formatNextRun(detailLastRunAt, detailIntervalSec, nowTick)
+	: '--'
   const guidePublicOrigin = useMemo(() => {
 	if (typeof window !== 'undefined' && window.location?.origin) {
 	  return window.location.origin
@@ -1276,6 +2093,144 @@ function TargetDetailPage({ token }: { token: string }) {
 	return trackingScriptTagSnippet
   }, [guideMode, trackingManualSnippet, trackingScriptTagSnippet, trackingSnippet, trackingVueSnippet])
   const guideRows = guideMode === 'script' ? 3 : (guideMode === 'manual' ? 14 : 18)
+  const latencyProgressPercent = useMemo(() => {
+	if (!latencyJobProgress || latencyJobProgress.total <= 0) return 0
+	return Math.min(100, Math.max(0, Math.round((latencyJobProgress.done / latencyJobProgress.total) * 100)))
+  }, [latencyJobProgress])
+  const visibleSubscriptionNodes = useMemo(() => {
+	if (subscriptionNodes.length <= NODE_VIRTUAL_THRESHOLD) return subscriptionNodes
+	return subscriptionNodes.slice(0, subscriptionRenderCount)
+  }, [subscriptionNodes, subscriptionRenderCount])
+  const availableSubscriptionCount = useMemo(() => {
+	return subscriptionNodes.reduce((count, node) => {
+		const state = nodeLatencyState(node)
+		if (state === 'fast' || state === 'good' || state === 'slow' || state === 'bad') return count + 1
+		return count
+	}, 0)
+  }, [subscriptionNodes])
+
+  async function loadSubscriptionNodes() {
+	if (!Number.isFinite(id) || id <= 0) return
+	const rows = await api<SubscriptionNode[]>(`/api/targets/${id}/subscription/nodes?sort=${subscriptionSort}&search=${encodeURIComponent(subscriptionSearch)}`, undefined, token)
+	setSubscriptionNodes(rows)
+  }
+
+	function applySubscriptionNodeResult(node?: SubscriptionLatencyJobNode) {
+		if (!node) return
+		setSubscriptionNodes((prev) => {
+			let hit = false
+			const next = prev.map((row) => {
+				if (row.node_uid !== node.node_uid) return row
+				hit = true
+				return {
+					...row,
+					last_latency_ms: typeof node.latency_ms === 'number' ? node.latency_ms : undefined,
+					last_latency_checked_at: node.checked_at,
+				}
+			})
+			return hit ? next : prev
+		})
+		setRefreshingNodeMap((prev) => {
+			if (!prev[node.node_uid]) return prev
+			const next = { ...prev }
+			delete next[node.node_uid]
+			return next
+		})
+	}
+
+	async function streamSubscriptionLatencyJob(jobID: string): Promise<void> {
+		await new Promise<void>((resolve, reject) => {
+			const streamURL = `${API_BASE}/api/targets/${id}/subscription/latency/jobs/${encodeURIComponent(jobID)}/events?access_token=${encodeURIComponent(token)}`
+			const es = new EventSource(streamURL)
+			let closed = false
+
+			const close = () => {
+				if (!closed) {
+					es.close()
+					closed = true
+				}
+			}
+
+			const onJobEvent = (raw: MessageEvent) => {
+				try {
+					const payload = JSON.parse(raw.data) as SubscriptionLatencyJobEvent
+					if (payload.job) {
+						setLatencyJobProgress(payload.job)
+					}
+					if (payload.node) {
+						applySubscriptionNodeResult(payload.node)
+					}
+					if (payload.job?.status === 'done' || payload.type === 'done') {
+						close()
+						resolve()
+						return
+					}
+					if (payload.job?.status === 'failed' || payload.type === 'failed') {
+						close()
+						reject(new Error(payload.job?.message || '订阅测速任务失败'))
+					}
+				} catch {
+					close()
+					reject(new Error('订阅测速流解析失败'))
+				}
+			}
+
+			es.addEventListener('snapshot', onJobEvent)
+			es.addEventListener('node_result', onJobEvent)
+			es.addEventListener('progress', onJobEvent)
+			es.addEventListener('done', onJobEvent)
+			es.addEventListener('failed', onJobEvent)
+			es.onerror = () => {
+				close()
+				reject(new Error('订阅测速流中断'))
+			}
+		})
+	}
+
+	async function pollSubscriptionLatencyJob(jobID: string) {
+		for (let i = 0; i < 300; i += 1) {
+			const status = await api<SubscriptionLatencyJobStatus>(`/api/targets/${id}/subscription/latency/jobs/${encodeURIComponent(jobID)}`, undefined, token)
+			setLatencyJobProgress(status)
+			await loadSubscriptionNodes()
+			if (status.status === 'done') return
+			if (status.status === 'failed') {
+				throw new Error(status.message || '订阅测速任务失败')
+			}
+			await new Promise((resolve) => setTimeout(resolve, 1200))
+		}
+		throw new Error('订阅测速轮询超时')
+	}
+
+  async function handleRefreshSubscriptionLatency() {
+	if (!Number.isFinite(id) || id <= 0) return
+	setError('')
+	setRefreshingLatency(true)
+	setLatencyJobProgress(null)
+	const pendingMap: Record<string, boolean> = {}
+	for (const row of subscriptionNodes) {
+		pendingMap[row.node_uid] = true
+	}
+	setRefreshingNodeMap(pendingMap)
+	try {
+	  const job = await api<SubscriptionLatencyJobStatus>(`/api/targets/${id}/subscription/latency/jobs`, { method: 'POST' }, token)
+	  setLatencyJobProgress(job)
+	  try {
+		await streamSubscriptionLatencyJob(job.job_id)
+	  } catch {
+		await pollSubscriptionLatencyJob(job.job_id)
+	  }
+	  await Promise.all([
+		loadSubscriptionNodes(),
+		api<SubscriptionSummary>(`/api/targets/${id}/subscription/summary`, undefined, token).then(setSubscriptionSummary),
+	  ])
+	} catch (err) {
+	  setError((err as Error).message)
+	} finally {
+	  setRefreshingNodeMap({})
+	  setLatencyJobProgress(null)
+	  setRefreshingLatency(false)
+	}
+  }
 
   async function handleCopyTrackingSnippet() {
 	if (!trackingConfig.write_key) return
@@ -1342,9 +2297,9 @@ function TargetDetailPage({ token }: { token: string }) {
         const row = chartSeries.rows[first.dataIndex]
         if (!row) return first.axisValueLabel
         const status = row.success ? '在线' : '异常'
-        const latency = row.latency_ms > 0 ? `${row.latency_ms}ms` : '--'
-        return `${formatDateTime(row.checked_at)}<br/>状态: ${status}<br/>延迟: ${latency}<br/>错误: ${row.error_msg || '无'}`
-      },
+		const latency = row.success ? `${Math.max(0, row.latency_ms)}ms` : '--'
+		return `${formatDateTime(row.checked_at)}<br/>状态: ${status}<br/>延迟: ${latency}<br/>错误: ${row.error_msg || '无'}`
+	  },
     },
     grid: { left: 40, right: 16, top: 20, bottom: 28 },
     xAxis: {
@@ -1541,7 +2496,7 @@ function TargetDetailPage({ token }: { token: string }) {
   return (
     <div className="workspace">
       <header className="workspace-header">
-        <div>
+		<div className="header-main">
           <button type="button" className="back-button" onClick={() => navigate('/')}>
             <ArrowLeft size={16} /> 返回
           </button>
@@ -1583,22 +2538,23 @@ function TargetDetailPage({ token }: { token: string }) {
       {error ? <p className="error panel">{error}</p> : null}
 
       <section className="kpi-grid">
+		<article className="panel metric-card">
+		  <p className="panel-title"><ShieldCheck size={15} /> {isTrackingTarget ? '窗口PV' : (isSubscriptionTarget ? '节点状态' : '窗口可用率')}</p>
+		  <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.reduce((sum, item) => sum + item.count, 0)) : (isSubscriptionTarget ? `${availableSubscriptionCount}/${subscriptionSummary?.node_total ?? subscriptionNodes.length}` : `${uptime.toFixed(1)}%`))}</p>
+		</article>
         <article className="panel metric-card">
-          <p className="panel-title"><ShieldCheck size={15} /> {isTrackingTarget ? '窗口PV' : '窗口可用率'}</p>
-          <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.reduce((sum, item) => sum + item.count, 0)) : `${uptime.toFixed(1)}%`)}</p>
+          <p className="panel-title"><Gauge size={15} /> {isTrackingTarget ? '窗口UV' : (isSubscriptionTarget ? '剩余流量' : '平均延迟')}</p>
+          <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(new Set(windowedTrackingEvents.map((item) => item.uv_key).filter(Boolean)).size) : (isSubscriptionTarget ? formatBytes(subscriptionSummary?.remaining_bytes) : (avgLatency > 0 ? `${avgLatency}ms` : '--')))}</p>
         </article>
         <article className="panel metric-card">
-          <p className="panel-title"><Gauge size={15} /> {isTrackingTarget ? '窗口UV' : '平均延迟'}</p>
-          <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(new Set(windowedTrackingEvents.map((item) => item.uv_key).filter(Boolean)).size) : (avgLatency > 0 ? `${avgLatency}ms` : '--'))}</p>
+          <p className="panel-title"><AlertTriangle size={15} /> {isTrackingTarget ? '事件条数' : (isSubscriptionTarget ? '订阅状态' : '失败次数')}</p>
+          <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.length) : (isSubscriptionTarget ? (subscriptionSummary?.reachable ? '可访问' : (subscriptionSummary?.error_msg || '异常')) : String(failureRows.length)))}</p>
         </article>
-        <article className="panel metric-card">
-          <p className="panel-title"><AlertTriangle size={15} /> {isTrackingTarget ? '事件条数' : '失败次数'}</p>
-          <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.length) : String(failureRows.length))}</p>
-        </article>
-        <article className="panel metric-card">
-          <p className="panel-title"><Clock3 size={15} /> {isTrackingTarget ? '最后事件' : '最后检测'}</p>
-          <p className="panel-value">{loading ? '...' : (isTrackingTarget ? (trackingSummary?.last_event_at ? formatAgo(trackingSummary.last_event_at) : '--') : (latest ? formatAgo(latest.checked_at) : '--'))}</p>
-        </article>
+		<article className="panel metric-card">
+		  <p className="panel-title"><Clock3 size={15} /> {isTrackingTarget ? '最后事件' : (isSubscriptionTarget ? '最近拉取' : '最后检测')}</p>
+		  <p className="panel-value">{loading ? '...' : (isTrackingTarget ? (trackingSummary?.last_event_at ? formatAgo(trackingSummary.last_event_at) : '--') : (isSubscriptionTarget ? (subscriptionSummary?.last_checked_at ? formatAgo(subscriptionSummary.last_checked_at) : '--') : (latest ? formatAgo(latest.checked_at) : '--')))}</p>
+		  {!isTrackingTarget ? <p className="muted">下次检测：{detailNextRun}</p> : null}
+		</article>
 		{target?.type === 'ai' || target?.type === 'api' ? (
 		  <>
 			<article className="panel metric-card">
@@ -1766,7 +2722,7 @@ function TargetDetailPage({ token }: { token: string }) {
 					<span className="muted">{formatDateTime(row.checked_at)}</span>
 				  </div>
 				  <div className="log-row-body">
-					<span>延迟：{row.latency_ms > 0 ? `${row.latency_ms}ms` : '--'}</span>
+					<span>延迟：{row.success ? `${Math.max(0, row.latency_ms)}ms` : '--'}</span>
 					<span>错误：{row.error_msg || '无'}</span>
 				  </div>
 				</div>
@@ -1774,6 +2730,63 @@ function TargetDetailPage({ token }: { token: string }) {
             {logsToShow.length === 0 ? <p className="muted">暂无日志</p> : null}
           </div>
         </article>
+
+		{isSubscriptionTarget ? (
+		  <article className="panel subscription-panel-full">
+			<div className="panel-head">
+			  <h3>节点列表</h3>
+			  <span>可用 {availableSubscriptionCount}/{subscriptionNodes.length}</span>
+			</div>
+			<div className="log-filters">
+			  <input value={subscriptionSearch} onChange={(e) => setSubscriptionSearch(e.target.value)} placeholder="搜索节点名称或地址" />
+			  <div className="type-chips">
+				<button type="button" className={`chip ${subscriptionSort === 'source' ? 'active' : ''}`} onClick={() => setSubscriptionSort('source')}>源顺序</button>
+				<button type="button" className={`chip ${subscriptionSort === 'latency' ? 'active' : ''}`} onClick={() => setSubscriptionSort('latency')}>延迟</button>
+				<button type="button" className={`chip ${subscriptionSort === 'name' ? 'active' : ''}`} onClick={() => setSubscriptionSort('name')}>名称</button>
+			  </div>
+			  <button type="button" onClick={() => void handleRefreshSubscriptionLatency()} disabled={refreshingLatency}>
+				{refreshingLatency ? '测速中...' : '刷新测速'}
+			  </button>
+			</div>
+			<p className="muted">测速配置：并发 {subscriptionConfig.latency_concurrency}，基线超时 {subscriptionConfig.latency_timeout_ms}ms，E2E超时 {subscriptionConfig.e2e_timeout_ms}ms，拉取超时 {subscriptionConfig.fetch_timeout_ms}ms（重试 {subscriptionConfig.fetch_retries}），探测 {subscriptionConfig.latency_probe_count} 次，间隔 {subscriptionConfig.latency_interval_sec}s，国内权重 {subscriptionConfig.weight_domestic.toFixed(2)}，海外权重 {subscriptionConfig.weight_overseas.toFixed(2)}</p>
+			{refreshingLatency && latencyJobProgress ? (
+			  <div className="subscription-progress">
+				<p className="muted">测速进度：{latencyJobProgress.done}/{latencyJobProgress.total}（{latencyProgressPercent}%），成功 {latencyJobProgress.success}，失败 {latencyJobProgress.failed}</p>
+				<div className="subscription-progress-track" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={latencyProgressPercent} aria-label="订阅测速进度">
+				  <span className="subscription-progress-fill" style={{ width: `${latencyProgressPercent}%` }} />
+				</div>
+			  </div>
+			) : null}
+			  {subscriptionNodes.length > NODE_VIRTUAL_THRESHOLD ? (
+			  <p className="muted">节点较多（{subscriptionNodes.length}），已启用增量渲染模式。</p>
+			) : null}
+			<div className={`subscription-node-grid ${subscriptionNodes.length > NODE_VIRTUAL_THRESHOLD ? 'compact' : ''}`}>
+			  {visibleSubscriptionNodes.map((row) => {
+				const pending = Boolean(refreshingNodeMap[row.node_uid])
+				const state = pending ? 'pending' : nodeLatencyState(row)
+				return (
+				<article className={`subscription-node-card latency-${state}`} key={row.id} onClick={() => navigate(`/targets/${id}/subscription/nodes/${encodeURIComponent(row.node_uid)}`)}>
+				  <div className="subscription-node-head">
+					<strong>{row.name}</strong>
+					<span className="muted">{row.protocol || '-'}</span>
+				  </div>
+				  <div className="subscription-node-meta">
+					<span className={`latency-text ${state === 'error' ? 'latency-error' : state === 'pending' ? 'latency-pending' : ''}`}>
+					  {state === 'error'
+						? '测速失败'
+						: state === 'degraded'
+						? `链路降级（TCP ${row.last_tcp_ms || '--'}ms）`
+						: state === 'pending'
+						? '测速中...'
+						: `业务延迟：${row.last_latency_ms}ms`}
+					</span>
+				  </div>
+				</article>
+			  )})}
+			</div>
+			{subscriptionNodes.length === 0 ? <p className="muted">暂无节点数据</p> : null}
+		  </article>
+		) : null}
 
 		{isTrackingTarget ? (
 		  <article className="panel">
@@ -1932,7 +2945,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  />
 				</label>
 			  ) : null}
-			  {editForm.type === 'ai' || editForm.type === 'api' ? (
+			  {editForm.type === 'ai' ? (
 				<label>
 				  API Key
 				  <input
@@ -1943,6 +2956,171 @@ function TargetDetailPage({ token }: { token: string }) {
 					required
 				  />
 				</label>
+			  ) : null}
+			  {editForm.type === 'subscription' ? (
+				<>
+				<div className="form-row">
+				  <label>
+					测速并发（大于等于1）
+					<input
+					  type="number"
+					  min={1}
+					  value={editForm.latency_concurrency}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_concurrency: Number(e.target.value) || 1 }))}
+					  required
+					/>
+				  </label>
+				  <label>
+					测速超时(ms)
+					<input
+					  type="number"
+					  min={100}
+					  value={editForm.latency_timeout_ms}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_timeout_ms: Number(e.target.value) || 1200 }))}
+					  required
+					/>
+				  </label>
+				  <label>
+					E2E超时(ms)
+					<input
+					  type="number"
+					  min={500}
+					  value={editForm.e2e_timeout_ms}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, e2e_timeout_ms: Number(e.target.value) || 6000 }))}
+					  required
+					/>
+				  </label>
+				  <label>
+					订阅拉取超时(ms)
+					<input
+					  type="number"
+					  min={1000}
+					  value={editForm.fetch_timeout_ms}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_timeout_ms: Number(e.target.value) || 20000 }))}
+					  required
+					/>
+				  </label>
+				  <label>
+					拉取重试次数
+					<input
+					  type="number"
+					  min={0}
+					  max={5}
+					  value={editForm.fetch_retries}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_retries: Math.max(0, Math.min(5, Number(e.target.value) || 0)) }))}
+					  required
+					/>
+				  </label>
+				  <label>
+					单节点探测次数
+					<input
+					  type="number"
+					  min={1}
+					  value={editForm.latency_probe_count}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_probe_count: Number(e.target.value) || 3 }))}
+					  required
+					/>
+				  </label>
+				  <label>
+					自动测速间隔(秒)
+					<input
+					  type="number"
+					  min={10}
+					  value={editForm.latency_interval_sec}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_interval_sec: Number(e.target.value) || 300 }))}
+					  required
+					/>
+				  </label>
+				  <label>
+					国内权重
+					<input
+					  type="number"
+					  min={0}
+					  step="0.1"
+					  value={editForm.weight_domestic}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, weight_domestic: Math.max(0, Number(e.target.value) || 0) }))}
+					  required
+					/>
+				  </label>
+				  <label>
+					海外权重
+					<input
+					  type="number"
+					  min={0}
+					  step="0.1"
+					  value={editForm.weight_overseas}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, weight_overseas: Math.max(0, Number(e.target.value) || 0) }))}
+					  required
+					/>
+				  </label>
+				</div>
+				<label>
+				  国内测速URL（每行一个）
+				  <AutoGrowTextarea value={editForm.probe_urls_domestic_text} onChange={(e) => setEditForm((prev) => ({ ...prev, probe_urls_domestic_text: e.target.value }))} rows={3} />
+				</label>
+				<label>
+				  海外测速URL（每行一个）
+				  <AutoGrowTextarea value={editForm.probe_urls_overseas_text} onChange={(e) => setEditForm((prev) => ({ ...prev, probe_urls_overseas_text: e.target.value }))} rows={3} />
+				</label>
+				<label>
+				  sing-box 路径
+				  <input value={editForm.singbox_path} onChange={(e) => setEditForm((prev) => ({ ...prev, singbox_path: e.target.value }))} placeholder="sing-box" />
+				</label>
+				<label>
+				  订阅拉取代理（可选）
+				  <input value={editForm.fetch_proxy_url} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_proxy_url: e.target.value }))} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />
+				</label>
+				<label>
+				  订阅拉取 UA
+				  <input value={editForm.fetch_user_agent} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_user_agent: e.target.value }))} placeholder={DEFAULT_SUB_FETCH_UA} />
+				</label>
+				<label>
+				  订阅拉取 Cookie（可选）
+				  <AutoGrowTextarea value={editForm.fetch_cookie} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_cookie: e.target.value }))} rows={2} />
+				</label>
+				<label>
+				  手动到期时间（可选）
+				  <input
+					  type="datetime-local"
+					  value={editForm.manual_expire_at}
+					  onChange={(e) => setEditForm((prev) => ({ ...prev, manual_expire_at: e.target.value }))}
+					  onClick={(e) => openDateTimePicker(e.currentTarget)}
+					  onFocus={(e) => openDateTimePicker(e.currentTarget)}
+				  />
+				</label>
+				</>
+			  ) : null}
+			  {editForm.type === 'port' ? (
+				<>
+				  <label>
+					协议
+					<div className="type-chips">
+					  <button type="button" className={`chip ${editForm.protocol === 'tcp' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, protocol: 'tcp' }))}>TCP</button>
+					  <button type="button" className={`chip ${editForm.protocol === 'udp' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, protocol: 'udp' }))}>UDP</button>
+					</div>
+				  </label>
+				  {editForm.protocol === 'udp' ? (
+					<>
+					  <label>
+						UDP 模式
+						<div className="type-chips">
+						  <button type="button" className={`chip ${editForm.udp_mode === 'send_only' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, udp_mode: 'send_only' }))}>仅发送</button>
+						  <button type="button" className={`chip ${editForm.udp_mode === 'request_response' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, udp_mode: 'request_response' }))}>发送并校验回包</button>
+						</div>
+					  </label>
+					  <label>
+						UDP 发送内容
+						<input value={editForm.udp_payload} onChange={(e) => setEditForm((prev) => ({ ...prev, udp_payload: e.target.value }))} placeholder="ping" />
+					  </label>
+					  {editForm.udp_mode === 'request_response' ? (
+						<label>
+						  期望回包（包含）
+						  <input value={editForm.udp_expect} onChange={(e) => setEditForm((prev) => ({ ...prev, udp_expect: e.target.value }))} placeholder="pong" required />
+						</label>
+					  ) : null}
+					</>
+				  ) : null}
+				</>
 			  ) : null}
 			  {editForm.type === 'tracking' ? (
 				<>
@@ -2072,6 +3250,120 @@ function TargetDetailPage({ token }: { token: string }) {
   )
 }
 
+function SubscriptionNodeDetailPage({ token }: { token: string }) {
+	const navigate = useNavigate()
+	const params = useParams()
+	const id = Number(params.id)
+	const uid = decodeURIComponent(params.uid ?? '')
+	const [loading, setLoading] = useState(true)
+	const [error, setError] = useState('')
+	const [summary, setSummary] = useState<SubscriptionNodeSummary | null>(null)
+	const [series, setSeries] = useState<SubscriptionNodeSeriesPoint[]>([])
+	const [logs, setLogs] = useState<SubscriptionNodeCheck[]>([])
+
+	async function load() {
+		if (!Number.isFinite(id) || id <= 0 || !uid) return
+		setLoading(true)
+		setError('')
+		try {
+			const [s, se, lg] = await Promise.all([
+				api<SubscriptionNodeSummary>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/summary`, undefined, token),
+				api<SubscriptionNodeSeriesPoint[]>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/series?hours=24`, undefined, token),
+				api<SubscriptionNodeCheck[]>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/logs?limit=100`, undefined, token),
+			])
+			setSummary(s)
+			setSeries(se)
+			setLogs(lg)
+		} catch (err) {
+			setError((err as Error).message)
+		} finally {
+			setLoading(false)
+		}
+	}
+
+	useEffect(() => {
+		void load()
+	}, [id, uid, token])
+
+	async function handleCheckNow() {
+		try {
+			await api(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/check-now`, { method: 'POST' }, token)
+			await load()
+		} catch (err) {
+			setError((err as Error).message)
+		}
+	}
+
+	const latencyOption = useMemo(() => ({
+		backgroundColor: 'transparent',
+		grid: { left: 26, right: 20, top: 26, bottom: 26, containLabel: true },
+		xAxis: { type: 'category', data: series.map((x) => new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) },
+		yAxis: { type: 'value' },
+		series: [{ type: 'line', smooth: true, showSymbol: false, data: series.map((x) => x.latency_ms) }],
+	}), [series])
+
+	const availabilityOption = useMemo(() => ({
+		backgroundColor: 'transparent',
+		grid: { left: 26, right: 20, top: 26, bottom: 26, containLabel: true },
+		xAxis: { type: 'category', data: series.map((x) => new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) },
+		yAxis: { type: 'value', min: 0, max: 100 },
+		series: [{ type: 'line', smooth: true, showSymbol: false, data: series.map((x) => x.availability) }],
+	}), [series])
+
+	return (
+		<div className="workspace">
+			<header className="workspace-header">
+				<div className="header-main">
+					<button type="button" className="back-button" onClick={() => navigate(-1)}>
+						<ArrowLeft size={16} /> 返回
+					</button>
+					<h1 className="detail-title">节点详情</h1>
+					<p className="muted">{summary?.node?.name ?? uid}</p>
+				</div>
+				<div className="header-actions">
+					<button type="button" onClick={() => void load()}><RefreshCcw size={16} /> 刷新</button>
+					<button type="button" className="primary" onClick={() => void handleCheckNow()}><Activity size={16} /> 手动检测</button>
+				</div>
+			</header>
+			{error ? <p className="error panel">{error}</p> : null}
+			<section className="kpi-grid">
+				<article className="panel metric-card"><p className="panel-title">24h可用率</p><p className="panel-value">{loading ? '...' : `${summary?.availability_24h?.toFixed(1) ?? '0'}%`}</p></article>
+				<article className="panel metric-card"><p className="panel-title">24h平均延迟</p><p className="panel-value">{loading ? '...' : `${Math.round(summary?.avg_latency_24h_ms ?? 0)}ms`}</p></article>
+				<article className="panel metric-card"><p className="panel-title">检查次数</p><p className="panel-value">{loading ? '...' : String(summary?.check_count_24h ?? 0)}</p></article>
+				<article className="panel metric-card"><p className="panel-title">最近延迟</p><p className="panel-value">{loading ? '...' : (typeof summary?.latest_latency_ms === 'number' ? `${summary.latest_latency_ms}ms` : '--')}</p></article>
+			</section>
+			<section className="detail-grid">
+				<article className="panel"><div className="panel-head"><h3>延迟趋势</h3></div><ReactECharts option={latencyOption} style={{ height: 220 }} /></article>
+				<article className="panel"><div className="panel-head"><h3>可用率趋势</h3></div><ReactECharts option={availabilityOption} style={{ height: 220 }} /></article>
+				<article className="panel subscription-panel-full">
+					<div className="panel-head"><h3>查询日志</h3><span>最近 100 条</span></div>
+					<div className="logs-list">
+						{logs.map((row) => (
+							<div className="log-row" key={row.id}>
+								<div className="log-row-head"><span className={`status ${row.success ? 'ok' : 'down'}`}>{row.success ? '成功' : '失败'}</span><span className="muted">{formatDateTime(row.checked_at)}</span></div>
+							<div className="log-row-body">
+								<span>业务延迟(海外E2E)：{row.success ? `${Math.max(0, row.latency_ms)}ms` : '--'}</span>
+								<span>综合评分：{row.score_ms > 0 ? `${row.score_ms}ms` : '--'}</span>
+								<span>E2E-国内：{row.e2e_domestic_ms > 0 ? `${row.e2e_domestic_ms}ms` : '--'}</span>
+								<span>E2E-海外：{row.e2e_overseas_ms > 0 ? `${row.e2e_overseas_ms}ms` : '--'}</span>
+								<span>TCP：{row.tcp_ms > 0 ? `${row.tcp_ms}ms` : '--'}</span>
+								<span>TLS：{row.tls_ms > 0 ? `${row.tls_ms}ms` : '--'}</span>
+								<span>抖动：{row.jitter_ms > 0 ? `${row.jitter_ms}ms` : '--'}</span>
+								<span>模式：{row.probe_mode || '--'}</span>
+								<span>失败阶段：{row.fail_stage || '--'}</span>
+								<span>失败原因：{row.fail_reason || '--'}</span>
+								<span>错误：{row.error_msg || '无'}</span>
+							</div>
+						  </div>
+						))}
+						{logs.length === 0 ? <p className="muted">暂无日志</p> : null}
+					</div>
+				</article>
+			</section>
+		</div>
+	)
+}
+
 function App() {
   const [initialized, setInitialized] = useState<boolean | null>(null)
   const [token, setToken] = useState<string>(() => localStorage.getItem('all_monitor_token') ?? '')
@@ -2091,6 +3383,15 @@ function App() {
     void api<{ initialized: boolean }>('/api/init/status')
       .then((d) => setInitialized(d.initialized))
       .catch((e: Error) => setError(e.message))
+  }, [])
+
+  useEffect(() => {
+	const onAuthExpired = () => {
+		setToken('')
+		setError('登录已失效，请重新登录')
+	}
+	window.addEventListener(AUTH_EXPIRED_EVENT, onAuthExpired)
+	return () => window.removeEventListener(AUTH_EXPIRED_EVENT, onAuthExpired)
   }, [])
 
   async function handleSetup(e: FormEvent<HTMLFormElement>) {
@@ -2149,10 +3450,10 @@ function App() {
             <input name="password" type="password" required minLength={8} maxLength={64} />
           </label>
           <button className="primary" type="submit">完成初始化</button>
-          {error ? <p className="error">{error}</p> : null}
-        </form>
-      </div>
-    )
+		  {error ? <p className={isAuthExpiredMessage(error) ? 'auth-expired-tip' : 'error'}>{error}</p> : null}
+		</form>
+	  </div>
+	)
   }
 
   if (!token) {
@@ -2170,10 +3471,10 @@ function App() {
             <input name="password" type="password" required />
           </label>
           <button className="primary" type="submit">登录</button>
-          {error ? <p className="error">{error}</p> : null}
-        </form>
-      </div>
-    )
+		  {error ? <p className={isAuthExpiredMessage(error) ? 'auth-expired-tip' : 'error'}>{error}</p> : null}
+		</form>
+	  </div>
+	)
   }
 
   return (
@@ -2194,6 +3495,7 @@ function App() {
           )}
         />
         <Route path="/targets/:id" element={<TargetDetailPage token={token} />} />
+        <Route path="/targets/:id/subscription/nodes/:uid" element={<SubscriptionNodeDetailPage token={token} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

@@ -8,10 +8,14 @@ import (
 	"all-monitor/server/internal/router"
 	"all-monitor/server/internal/scheduler"
 	"all-monitor/server/internal/service"
+	"all-monitor/server/internal/webstatic"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -44,6 +48,12 @@ func main() {
 		log.Fatalf("auto migrate failed: %v", err)
 	}
 
+	if changed, err := normalizeLegacyTargetTypes(db); err != nil {
+		log.Fatalf("normalize legacy target types failed: %v", err)
+	} else if changed > 0 {
+		log.Printf("normalized %d legacy targets", changed)
+	}
+
 	authService := &service.AuthService{DB: db, JWTSecret: cfg.JWTSecret}
 	var geoResolver service.GeoResolver
 	if cfg.IPRegionDB != "" {
@@ -60,7 +70,7 @@ func main() {
 	h := &handler.Handler{Auth: authService, Target: targetService}
 
 	// 调度器独立协程运行，负责周期性写入检测结果。
-	s := &scheduler.Scheduler{DB: db, Concurrency: 8}
+	s := &scheduler.Scheduler{DB: db, Concurrency: 8, Target: targetService}
 	go s.Start(context.Background())
 
 	r := gin.Default()
@@ -84,6 +94,7 @@ func main() {
 		AllowHeaders: []string{"Authorization", "Content-Type"},
 	}))
 	router.Register(r, h, cfg.JWTSecret)
+	registerEmbeddedWeb(r)
 
 	listener, boundPort, err := listenWithFallback(cfg.AppPort, 20)
 	if err != nil {
@@ -96,6 +107,47 @@ func main() {
 	if err := r.RunListener(listener); err != nil {
 		log.Fatalf("run server failed: %v", err)
 	}
+}
+
+func registerEmbeddedWeb(r *gin.Engine) {
+	distFS, err := webstatic.DistFS()
+	if err != nil || !webstatic.HasIndex(distFS) {
+		log.Printf("embedded web assets not found, frontend static serving disabled")
+		return
+	}
+
+	indexHTML, err := fs.ReadFile(distFS, "index.html")
+	if err != nil {
+		log.Printf("embedded web index load failed: %v", err)
+		return
+	}
+
+	fileServer := http.FileServer(http.FS(distFS))
+	r.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+			return
+		}
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
+			c.Status(http.StatusNotFound)
+			return
+		}
+
+		path := strings.TrimPrefix(c.Request.URL.Path, "/")
+		if path == "" || path == "index.html" {
+			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+			return
+		}
+
+		if st, statErr := fs.Stat(distFS, path); statErr == nil && !st.IsDir() {
+			c.Request.URL.Path = "/" + path
+			fileServer.ServeHTTP(c.Writer, c.Request)
+			return
+		}
+
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+	})
+	log.Printf("embedded web assets enabled")
 }
 
 func listenWithFallback(basePort string, maxRetry int) (net.Listener, string, error) {
@@ -184,4 +236,57 @@ func openDB(cfg *config.Config) (*gorm.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+func normalizeLegacyTargetTypes(db *gorm.DB) (int, error) {
+	var targets []model.MonitorTarget
+	if err := db.Where("type IN ?", []string{"http", "api", "tcp", "server", "node"}).Find(&targets).Error; err != nil {
+		return 0, err
+	}
+
+	updated := 0
+	for _, target := range targets {
+		newType := target.Type
+		switch target.Type {
+		case "http":
+			newType = "site"
+		case "api":
+			newType = "ai"
+		case "tcp", "server", "node":
+			newType = "port"
+		}
+
+		configJSON := strings.TrimSpace(target.ConfigJSON)
+		if configJSON == "" {
+			configJSON = "{}"
+		}
+
+		if newType == "port" {
+			cfg := map[string]any{}
+			_ = json.Unmarshal([]byte(configJSON), &cfg)
+			if _, ok := cfg["protocol"]; !ok {
+				cfg["protocol"] = "tcp"
+			}
+			if _, ok := cfg["udp_mode"]; !ok {
+				cfg["udp_mode"] = "send_only"
+			}
+			if _, ok := cfg["udp_payload"]; !ok {
+				cfg["udp_payload"] = "ping"
+			}
+			buf, err := json.Marshal(cfg)
+			if err == nil {
+				configJSON = string(buf)
+			}
+		}
+
+		if err := db.Model(&model.MonitorTarget{}).Where("id = ?", target.ID).Updates(map[string]any{
+			"type":        newType,
+			"config_json": configJSON,
+		}).Error; err != nil {
+			return updated, err
+		}
+		updated++
+	}
+
+	return updated, nil
 }

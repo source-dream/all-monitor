@@ -11,13 +11,18 @@ import (
 func JWTAuth(secret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		auth := c.GetHeader("Authorization")
-		if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+		tokenString := ""
+		if auth != "" && strings.HasPrefix(auth, "Bearer ") {
+			tokenString = strings.TrimPrefix(auth, "Bearer ")
+		} else {
+			tokenString = c.Query("access_token")
+		}
+		if tokenString == "" {
 			response.Err(c, 401, 40101, "missing bearer token")
 			c.Abort()
 			return
 		}
 
-		tokenString := strings.TrimPrefix(auth, "Bearer ")
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (any, error) {
 			return []byte(secret), nil
 		})
