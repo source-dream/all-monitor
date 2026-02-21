@@ -44,5 +44,7 @@ func Register(r *gin.Engine, h *handler.Handler, jwtSecret string) {
 		authed.GET("/targets/:id/subscription/nodes/:uid/series", h.SubscriptionNodeSeries)
 		authed.GET("/targets/:id/subscription/nodes/:uid/logs", h.SubscriptionNodeLogs)
 		authed.POST("/targets/:id/subscription/nodes/:uid/check-now", h.SubscriptionNodeCheckNow)
+		authed.GET("/preferences/defaults/:scope", h.GetPreferenceDefaults)
+		authed.PUT("/preferences/defaults/:scope", h.UpdatePreferenceDefaults)
 	}
 }

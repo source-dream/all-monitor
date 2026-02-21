@@ -67,7 +67,8 @@ func main() {
 	}
 
 	targetService := &service.TargetService{DB: db, GeoResolver: geoResolver}
-	h := &handler.Handler{Auth: authService, Target: targetService}
+	prefService := &service.PreferenceService{DB: db}
+	h := &handler.Handler{Auth: authService, Target: targetService, Pref: prefService}
 
 	// 调度器独立协程运行，负责周期性写入检测结果。
 	s := &scheduler.Scheduler{DB: db, Concurrency: 8, Target: targetService}

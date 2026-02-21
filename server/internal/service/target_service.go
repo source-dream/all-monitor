@@ -663,7 +663,7 @@ func (s *TargetService) MaybeAutoRefreshSubscriptionLatency(id uint) {
 	}
 	interval := cfg.LatencyIntervalSec
 	if interval <= 0 {
-		interval = 300
+		return
 	}
 	var last model.SubscriptionNodeCheck
 	if err := s.DB.Where("target_id = ?", id).Order("checked_at desc").First(&last).Error; err == nil {
@@ -1186,8 +1186,8 @@ func parseSubscriptionConfig(raw string) *subscriptionConfig {
 	if cfg.LatencyProbeCount <= 0 {
 		cfg.LatencyProbeCount = 3
 	}
-	if cfg.LatencyIntervalSec <= 0 {
-		cfg.LatencyIntervalSec = 300
+	if cfg.LatencyIntervalSec < 0 {
+		cfg.LatencyIntervalSec = 0
 	}
 	if cfg.WeightDomestic < 0 || cfg.WeightOverseas < 0 || (cfg.WeightDomestic+cfg.WeightOverseas) <= 0 {
 		cfg.WeightDomestic = 0.3

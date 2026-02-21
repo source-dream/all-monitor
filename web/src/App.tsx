@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { ChangeEvent, FormEvent } from 'react'
+import type { ChangeEvent, FormEvent, InputHTMLAttributes } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -247,6 +247,33 @@ type SubscriptionConfig = {
 	manual_expire_at: string
 }
 
+type PreferenceDefaultsPayload = {
+	scope: string
+	version: number
+	values: Record<string, unknown>
+	updated_at?: string
+}
+
+type SubscriptionCreateDefaults = {
+	latency_concurrency: number
+	latency_timeout_ms: number
+	e2e_timeout_ms: number
+	fetch_timeout_ms: number
+	fetch_retries: number
+	fetch_proxy_url: string
+	fetch_user_agent: string
+	fetch_cookie: string
+	latency_probe_count: number
+	latency_interval_sec: number
+	weight_domestic: number
+	weight_overseas: number
+	probe_urls_domestic: string[]
+	probe_urls_overseas: string[]
+	singbox_path: string
+	interval_sec: number
+	timeout_ms: number
+}
+
 type TrackingStatusInfo = {
 	label: string
 	variant: 'ok' | 'down' | 'degraded' | 'paused'
@@ -284,6 +311,26 @@ function resolveAPIBase(): string {
 
 const API_BASE = resolveAPIBase()
 const NODE_VIRTUAL_THRESHOLD = 800
+const SUBSCRIPTION_CREATE_SCOPE = 'subscription_create'
+const SUBSCRIPTION_CREATE_DEFAULTS: SubscriptionCreateDefaults = {
+	latency_concurrency: 20,
+	latency_timeout_ms: 1200,
+	e2e_timeout_ms: 6000,
+	fetch_timeout_ms: 20000,
+	fetch_retries: 2,
+	fetch_proxy_url: '',
+	fetch_user_agent: DEFAULT_SUB_FETCH_UA,
+	fetch_cookie: '',
+	latency_probe_count: 3,
+	latency_interval_sec: 300,
+	weight_domestic: 0.3,
+	weight_overseas: 0.7,
+	probe_urls_domestic: ['https://connectivitycheck.platform.hicloud.com/generate_204', 'https://www.qq.com/favicon.ico'],
+	probe_urls_overseas: ['https://www.google.com/generate_204', 'https://cp.cloudflare.com/generate_204'],
+	singbox_path: 'sing-box',
+	interval_sec: 0,
+	timeout_ms: 5000,
+}
 
 async function api<T>(path: string, options?: RequestInit, token?: string): Promise<T> {
   const headers = new Headers(options?.headers)
@@ -312,6 +359,51 @@ async function api<T>(path: string, options?: RequestInit, token?: string): Prom
 		throw new Error(body.message || `请求失败（HTTP ${res.status}）`)
 	}
   return body.data
+}
+
+function toFiniteNumber(raw: unknown): number | null {
+	if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
+	return raw
+}
+
+function normalizeSubscriptionCreateDefaults(values?: Record<string, unknown>): SubscriptionCreateDefaults {
+	const source = values ?? {}
+	const defaults = SUBSCRIPTION_CREATE_DEFAULTS
+	const normalizeURLs = (items: unknown, fallback: string[]) => {
+		if (!Array.isArray(items)) return fallback
+		const rows = items
+			.map((x) => String(x ?? '').trim())
+			.filter((x) => x.startsWith('http://') || x.startsWith('https://'))
+		return rows.length > 0 ? rows : fallback
+	}
+	const wdRaw = toFiniteNumber(source.weight_domestic)
+	const woRaw = toFiniteNumber(source.weight_overseas)
+	let wd = wdRaw !== null && wdRaw >= 0 ? wdRaw : defaults.weight_domestic
+	let wo = woRaw !== null && woRaw >= 0 ? woRaw : defaults.weight_overseas
+	if (wd + wo <= 0) {
+		wd = defaults.weight_domestic
+		wo = defaults.weight_overseas
+	}
+	const sum = wd + wo
+	return {
+		latency_concurrency: Math.max(1, Math.round(toFiniteNumber(source.latency_concurrency) ?? defaults.latency_concurrency)),
+		latency_timeout_ms: Math.max(100, Math.round(toFiniteNumber(source.latency_timeout_ms) ?? defaults.latency_timeout_ms)),
+		e2e_timeout_ms: Math.max(500, Math.round(toFiniteNumber(source.e2e_timeout_ms) ?? defaults.e2e_timeout_ms)),
+		fetch_timeout_ms: Math.max(1000, Math.round(toFiniteNumber(source.fetch_timeout_ms) ?? defaults.fetch_timeout_ms)),
+		fetch_retries: Math.max(0, Math.min(5, Math.round(toFiniteNumber(source.fetch_retries) ?? defaults.fetch_retries))),
+		fetch_proxy_url: String(source.fetch_proxy_url ?? defaults.fetch_proxy_url).trim(),
+		fetch_user_agent: String(source.fetch_user_agent ?? defaults.fetch_user_agent).trim() || defaults.fetch_user_agent,
+		fetch_cookie: String(source.fetch_cookie ?? defaults.fetch_cookie).trim(),
+		latency_probe_count: Math.max(1, Math.round(toFiniteNumber(source.latency_probe_count) ?? defaults.latency_probe_count)),
+		latency_interval_sec: Math.max(0, Math.round(toFiniteNumber(source.latency_interval_sec) ?? defaults.latency_interval_sec)),
+		weight_domestic: wd / sum,
+		weight_overseas: wo / sum,
+		probe_urls_domestic: normalizeURLs(source.probe_urls_domestic, defaults.probe_urls_domestic),
+		probe_urls_overseas: normalizeURLs(source.probe_urls_overseas, defaults.probe_urls_overseas),
+		singbox_path: String(source.singbox_path ?? defaults.singbox_path).trim() || defaults.singbox_path,
+		interval_sec: Math.max(0, Math.round(toFiniteNumber(source.interval_sec) ?? defaults.interval_sec)),
+		timeout_ms: Math.max(200, Math.round(toFiniteNumber(source.timeout_ms) ?? defaults.timeout_ms)),
+	}
 }
 
 function formatAgo(timeString: string): string {
@@ -642,7 +734,7 @@ function readSubscriptionConfig(configJSON?: string): SubscriptionConfig {
 			fetch_user_agent: (parsed.fetch_user_agent ?? '').trim() || defaults.fetch_user_agent,
 			fetch_cookie: (parsed.fetch_cookie ?? '').trim(),
 			latency_probe_count: typeof parsed.latency_probe_count === 'number' && parsed.latency_probe_count > 0 ? parsed.latency_probe_count : 3,
-			latency_interval_sec: typeof parsed.latency_interval_sec === 'number' && parsed.latency_interval_sec > 0 ? parsed.latency_interval_sec : 300,
+			latency_interval_sec: typeof parsed.latency_interval_sec === 'number' && parsed.latency_interval_sec >= 0 ? parsed.latency_interval_sec : 300,
 			weight_domestic: wd / sum,
 			weight_overseas: wo / sum,
 			probe_urls_domestic: normalizeURLs(parsed.probe_urls_domestic, defaults.probe_urls_domestic),
@@ -692,6 +784,12 @@ function AutoGrowTextarea({
 			className={className ? `auto-grow-textarea ${className}` : 'auto-grow-textarea'}
 		/>
 	)
+}
+
+type NumberStepperInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type'>
+
+function NumberStepperInput(props: NumberStepperInputProps) {
+	return <input type="number" {...props} />
 }
 
 function openDateTimePicker(input: HTMLInputElement) {
@@ -882,21 +980,23 @@ function DashboardPage({
   const [onlyAbnormal, setOnlyAbnormal] = useState(false)
   const [createType, setCreateType] = useState('site')
   const [createAPIKey, setCreateAPIKey] = useState('')
-  const [createSubConcurrency, setCreateSubConcurrency] = useState(20)
-  const [createSubTimeoutMS, setCreateSubTimeoutMS] = useState(1200)
-  const [createSubE2ETimeoutMS, setCreateSubE2ETimeoutMS] = useState(6000)
-  const [createSubFetchTimeoutMS, setCreateSubFetchTimeoutMS] = useState(20000)
-  const [createSubFetchRetries, setCreateSubFetchRetries] = useState(2)
-  const [createSubFetchProxyURL, setCreateSubFetchProxyURL] = useState('')
-  const [createSubFetchUA, setCreateSubFetchUA] = useState(DEFAULT_SUB_FETCH_UA)
-  const [createSubFetchCookie, setCreateSubFetchCookie] = useState('')
-  const [createSubProbeCount, setCreateSubProbeCount] = useState(3)
-  const [createSubIntervalSec, setCreateSubIntervalSec] = useState(300)
-  const [createSubWeightDomestic, setCreateSubWeightDomestic] = useState(0.3)
-  const [createSubWeightOverseas, setCreateSubWeightOverseas] = useState(0.7)
-  const [createSubURLsDomestic, setCreateSubURLsDomestic] = useState('https://connectivitycheck.platform.hicloud.com/generate_204\nhttps://www.qq.com/favicon.ico')
-  const [createSubURLsOverseas, setCreateSubURLsOverseas] = useState('https://www.google.com/generate_204\nhttps://cp.cloudflare.com/generate_204')
-  const [createSingBoxPath, setCreateSingBoxPath] = useState('sing-box')
+  const [createSubConcurrency, setCreateSubConcurrency] = useState(SUBSCRIPTION_CREATE_DEFAULTS.latency_concurrency)
+  const [createSubTimeoutMS, setCreateSubTimeoutMS] = useState(SUBSCRIPTION_CREATE_DEFAULTS.latency_timeout_ms)
+  const [createSubE2ETimeoutMS, setCreateSubE2ETimeoutMS] = useState(SUBSCRIPTION_CREATE_DEFAULTS.e2e_timeout_ms)
+  const [createSubFetchTimeoutMS, setCreateSubFetchTimeoutMS] = useState(SUBSCRIPTION_CREATE_DEFAULTS.fetch_timeout_ms)
+  const [createSubFetchRetries, setCreateSubFetchRetries] = useState(SUBSCRIPTION_CREATE_DEFAULTS.fetch_retries)
+  const [createSubFetchProxyURL, setCreateSubFetchProxyURL] = useState(SUBSCRIPTION_CREATE_DEFAULTS.fetch_proxy_url)
+  const [createSubFetchUA, setCreateSubFetchUA] = useState(SUBSCRIPTION_CREATE_DEFAULTS.fetch_user_agent)
+  const [createSubFetchCookie, setCreateSubFetchCookie] = useState(SUBSCRIPTION_CREATE_DEFAULTS.fetch_cookie)
+  const [createSubProbeCount, setCreateSubProbeCount] = useState(SUBSCRIPTION_CREATE_DEFAULTS.latency_probe_count)
+  const [createSubIntervalSec, setCreateSubIntervalSec] = useState(SUBSCRIPTION_CREATE_DEFAULTS.latency_interval_sec)
+  const [createSubWeightDomestic, setCreateSubWeightDomestic] = useState(SUBSCRIPTION_CREATE_DEFAULTS.weight_domestic)
+  const [createSubWeightOverseas, setCreateSubWeightOverseas] = useState(SUBSCRIPTION_CREATE_DEFAULTS.weight_overseas)
+  const [createSubURLsDomestic, setCreateSubURLsDomestic] = useState(SUBSCRIPTION_CREATE_DEFAULTS.probe_urls_domestic.join('\n'))
+  const [createSubURLsOverseas, setCreateSubURLsOverseas] = useState(SUBSCRIPTION_CREATE_DEFAULTS.probe_urls_overseas.join('\n'))
+  const [createSingBoxPath, setCreateSingBoxPath] = useState(SUBSCRIPTION_CREATE_DEFAULTS.singbox_path)
+  const [createSubTargetIntervalSec, setCreateSubTargetIntervalSec] = useState(SUBSCRIPTION_CREATE_DEFAULTS.interval_sec)
+  const [createSubTargetTimeoutMS, setCreateSubTargetTimeoutMS] = useState(SUBSCRIPTION_CREATE_DEFAULTS.timeout_ms)
   const [createSubManualExpireAt, setCreateSubManualExpireAt] = useState('')
   const [createPortProtocol, setCreatePortProtocol] = useState<PortProtocol>('tcp')
   const [createUDPMode, setCreateUDPMode] = useState<UDPMode>('send_only')
@@ -907,6 +1007,93 @@ function DashboardPage({
   const [createInactiveThreshold, setCreateInactiveThreshold] = useState(0)
   const [createWriteKey, setCreateWriteKey] = useState(() => generateWriteKey())
   const [nowTick, setNowTick] = useState(() => Date.now())
+  const [subDefaultsHydrated, setSubDefaultsHydrated] = useState(false)
+
+  useEffect(() => {
+	let cancelled = false
+	if (!token) {
+		setSubDefaultsHydrated(false)
+		return
+	}
+	void api<PreferenceDefaultsPayload>(`/api/preferences/defaults/${SUBSCRIPTION_CREATE_SCOPE}`, undefined, token)
+		.then((payload) => {
+			if (cancelled) return
+			const normalized = normalizeSubscriptionCreateDefaults(payload.values)
+			setCreateSubConcurrency(normalized.latency_concurrency)
+			setCreateSubTimeoutMS(normalized.latency_timeout_ms)
+			setCreateSubE2ETimeoutMS(normalized.e2e_timeout_ms)
+			setCreateSubFetchTimeoutMS(normalized.fetch_timeout_ms)
+			setCreateSubFetchRetries(normalized.fetch_retries)
+			setCreateSubFetchProxyURL(normalized.fetch_proxy_url)
+			setCreateSubFetchUA(normalized.fetch_user_agent)
+			setCreateSubFetchCookie(normalized.fetch_cookie)
+			setCreateSubProbeCount(normalized.latency_probe_count)
+			setCreateSubIntervalSec(normalized.latency_interval_sec)
+			setCreateSubWeightDomestic(normalized.weight_domestic)
+			setCreateSubWeightOverseas(normalized.weight_overseas)
+			setCreateSubURLsDomestic(normalized.probe_urls_domestic.join('\n'))
+			setCreateSubURLsOverseas(normalized.probe_urls_overseas.join('\n'))
+			setCreateSingBoxPath(normalized.singbox_path)
+			setCreateSubTargetIntervalSec(normalized.interval_sec)
+			setCreateSubTargetTimeoutMS(normalized.timeout_ms)
+		})
+		.finally(() => {
+			if (!cancelled) setSubDefaultsHydrated(true)
+		})
+	return () => {
+		cancelled = true
+	}
+  }, [token])
+
+  useEffect(() => {
+	if (!token || !subDefaultsHydrated) return
+	const normalized = normalizeSubscriptionCreateDefaults({
+		latency_concurrency: createSubConcurrency,
+		latency_timeout_ms: createSubTimeoutMS,
+		e2e_timeout_ms: createSubE2ETimeoutMS,
+		fetch_timeout_ms: createSubFetchTimeoutMS,
+		fetch_retries: createSubFetchRetries,
+		fetch_proxy_url: createSubFetchProxyURL,
+		fetch_user_agent: createSubFetchUA,
+		fetch_cookie: createSubFetchCookie,
+		latency_probe_count: createSubProbeCount,
+		latency_interval_sec: createSubIntervalSec,
+		weight_domestic: createSubWeightDomestic,
+		weight_overseas: createSubWeightOverseas,
+		probe_urls_domestic: createSubURLsDomestic.split('\n').map((x) => x.trim()).filter(Boolean),
+		probe_urls_overseas: createSubURLsOverseas.split('\n').map((x) => x.trim()).filter(Boolean),
+		singbox_path: createSingBoxPath,
+		interval_sec: createSubTargetIntervalSec,
+		timeout_ms: createSubTargetTimeoutMS,
+	})
+	const timer = window.setTimeout(() => {
+		void api<PreferenceDefaultsPayload>(`/api/preferences/defaults/${SUBSCRIPTION_CREATE_SCOPE}`, {
+			method: 'PUT',
+			body: JSON.stringify({ values: normalized }),
+		}, token).catch(() => undefined)
+	}, 600)
+	return () => window.clearTimeout(timer)
+  }, [
+	token,
+	subDefaultsHydrated,
+	createSubConcurrency,
+	createSubTimeoutMS,
+	createSubE2ETimeoutMS,
+	createSubFetchTimeoutMS,
+	createSubFetchRetries,
+	createSubFetchProxyURL,
+	createSubFetchUA,
+	createSubFetchCookie,
+	createSubProbeCount,
+	createSubIntervalSec,
+	createSubWeightDomestic,
+	createSubWeightOverseas,
+	createSubURLsDomestic,
+	createSubURLsOverseas,
+	createSingBoxPath,
+	createSubTargetIntervalSec,
+	createSubTargetTimeoutMS,
+  ])
 
   async function loadDashboard() {
     setError('')
@@ -1000,8 +1187,8 @@ function DashboardPage({
       name: String(form.get('name') ?? ''),
       type: createType,
       endpoint: createType === 'tracking' ? 'tracking://ingest' : String(form.get('endpoint') ?? ''),
-	  interval_sec: createType === 'tracking' ? 60 : (createType === 'subscription' ? Number(form.get('interval_sec') ?? 0) : Number(form.get('interval_sec') ?? 60)),
-      timeout_ms: createType === 'tracking' ? 5000 : Number(form.get('timeout_ms') ?? 5000),
+	  interval_sec: createType === 'tracking' ? 60 : (createType === 'subscription' ? createSubTargetIntervalSec : Number(form.get('interval_sec') ?? 60)),
+	  timeout_ms: createType === 'tracking' ? 5000 : (createType === 'subscription' ? createSubTargetTimeoutMS : Number(form.get('timeout_ms') ?? 5000)),
       enabled: true,
 	  config_json: createType === 'ai'
 		? JSON.stringify({ api_key: createAPIKey.trim() })
@@ -1070,8 +1257,16 @@ function DashboardPage({
 		setError('订阅拉取重试次数不能小于 0')
 		return
 	}
-	if (createType === 'subscription' && createSubIntervalSec <= 0) {
-		setError('自动测速间隔必须大于 0')
+	if (createType === 'subscription' && createSubIntervalSec < 0) {
+		setError('自动测速间隔不能小于 0（0 表示不定时测速）')
+		return
+	}
+	if (createType === 'subscription' && createSubTargetIntervalSec < 0) {
+		setError('订阅拉取间隔不能小于 0（0 表示不定时拉取）')
+		return
+	}
+	if (createType === 'subscription' && createSubTargetTimeoutMS <= 0) {
+		setError('超时必须大于 0')
 		return
 	}
 	if (createType === 'subscription' && (createSubWeightDomestic < 0 || createSubWeightOverseas < 0 || (createSubWeightDomestic + createSubWeightOverseas) <= 0)) {
@@ -1093,21 +1288,6 @@ function DashboardPage({
       formEl.reset()
 	  setCreateType('site')
 	  setCreateAPIKey('')
-	  setCreateSubConcurrency(20)
-	  setCreateSubTimeoutMS(1200)
-	  setCreateSubE2ETimeoutMS(6000)
-	  setCreateSubFetchTimeoutMS(20000)
-	  setCreateSubFetchRetries(2)
-	  setCreateSubFetchProxyURL('')
-	  setCreateSubFetchUA(DEFAULT_SUB_FETCH_UA)
-	  setCreateSubFetchCookie('')
-	  setCreateSubProbeCount(3)
-	  setCreateSubIntervalSec(300)
-	  setCreateSubWeightDomestic(0.3)
-	  setCreateSubWeightOverseas(0.7)
-	  setCreateSubURLsDomestic('https://connectivitycheck.platform.hicloud.com/generate_204\nhttps://www.qq.com/favicon.ico')
-	  setCreateSubURLsOverseas('https://www.google.com/generate_204\nhttps://cp.cloudflare.com/generate_204')
-	  setCreateSingBoxPath('sing-box')
 	  setCreateSubManualExpireAt('')
 	  setCreatePortProtocol('tcp')
 	  setCreateUDPMode('send_only')
@@ -1298,39 +1478,47 @@ function DashboardPage({
 			  <div className="form-row">
 				<label>
 				  测速并发（大于等于1）
-				  <input type="number" min={1} value={createSubConcurrency} onChange={(e) => setCreateSubConcurrency(Number(e.target.value) || 1)} required />
+				  <NumberStepperInput min={1} value={createSubConcurrency} onChange={(e) => setCreateSubConcurrency(Number(e.target.value) || 1)} required />
 				</label>
 				<label>
 				  测速超时(ms)
-				  <input type="number" min={100} value={createSubTimeoutMS} onChange={(e) => setCreateSubTimeoutMS(Number(e.target.value) || 1200)} required />
+				  <NumberStepperInput min={100} value={createSubTimeoutMS} onChange={(e) => setCreateSubTimeoutMS(Number(e.target.value) || 1200)} required />
 				</label>
 				<label>
 				  E2E超时(ms)
-				  <input type="number" min={500} value={createSubE2ETimeoutMS} onChange={(e) => setCreateSubE2ETimeoutMS(Number(e.target.value) || 6000)} required />
+				  <NumberStepperInput min={500} value={createSubE2ETimeoutMS} onChange={(e) => setCreateSubE2ETimeoutMS(Number(e.target.value) || 6000)} required />
 				</label>
 				<label>
 				  订阅拉取超时(ms)
-				  <input type="number" min={1000} value={createSubFetchTimeoutMS} onChange={(e) => setCreateSubFetchTimeoutMS(Number(e.target.value) || 20000)} required />
+				  <NumberStepperInput min={1000} value={createSubFetchTimeoutMS} onChange={(e) => setCreateSubFetchTimeoutMS(Number(e.target.value) || 20000)} required />
 				</label>
 				<label>
 				  拉取重试次数
-				  <input type="number" min={0} max={5} value={createSubFetchRetries} onChange={(e) => setCreateSubFetchRetries(Math.max(0, Math.min(5, Number(e.target.value) || 0)))} required />
+				  <NumberStepperInput min={0} max={5} value={createSubFetchRetries} onChange={(e) => setCreateSubFetchRetries(Math.max(0, Math.min(5, Number(e.target.value) || 0)))} required />
 				</label>
 				<label>
 				  单节点探测次数
-				  <input type="number" min={1} value={createSubProbeCount} onChange={(e) => setCreateSubProbeCount(Number(e.target.value) || 3)} required />
+				  <NumberStepperInput min={1} value={createSubProbeCount} onChange={(e) => setCreateSubProbeCount(Number(e.target.value) || 3)} required />
 				</label>
 				<label>
-				  自动测速间隔(秒)
-				  <input type="number" min={10} value={createSubIntervalSec} onChange={(e) => setCreateSubIntervalSec(Number(e.target.value) || 300)} required />
+				  自动测速间隔(秒，0=不定时)
+				  <NumberStepperInput
+					min={0}
+					value={createSubIntervalSec}
+					onChange={(e) => {
+						const next = Number(e.target.value)
+						setCreateSubIntervalSec(Number.isFinite(next) ? Math.max(0, Math.round(next)) : 0)
+					}}
+					required
+				  />
 				</label>
 				<label>
 				  国内权重
-				  <input type="number" min={0} step="0.1" value={createSubWeightDomestic} onChange={(e) => setCreateSubWeightDomestic(Math.max(0, Number(e.target.value) || 0))} required />
+				  <NumberStepperInput min={0} step={0.1} value={createSubWeightDomestic} onChange={(e) => setCreateSubWeightDomestic(Math.max(0, Number(e.target.value) || 0))} required />
 				</label>
 				<label>
 				  海外权重
-				  <input type="number" min={0} step="0.1" value={createSubWeightOverseas} onChange={(e) => setCreateSubWeightOverseas(Math.max(0, Number(e.target.value) || 0))} required />
+				  <NumberStepperInput min={0} step={0.1} value={createSubWeightOverseas} onChange={(e) => setCreateSubWeightOverseas(Math.max(0, Number(e.target.value) || 0))} required />
 				</label>
 			  </div>
 			  <label>
@@ -1423,8 +1611,7 @@ function DashboardPage({
 				</label>
 				<label>
 				  超过多久无上报判定失活(分钟)
-				  <input
-					type="number"
+				  <NumberStepperInput
 					min={0}
 					value={createInactiveThreshold}
 					onChange={(e) => setCreateInactiveThreshold(Math.max(0, Number(e.target.value) || 0))}
@@ -1436,12 +1623,36 @@ function DashboardPage({
 			{createType !== 'tracking' ? (
 			  <div className="form-row">
 				<label>
-				  间隔(秒)
-				  <input key={`interval-${createType}`} name="interval_sec" type="number" defaultValue={createType === 'subscription' ? 0 : 60} min={createType === 'subscription' ? 0 : 10} required />
+				  {createType === 'subscription' ? '订阅拉取间隔(秒，0=不定时)' : '间隔(秒)'}
+				  {createType === 'subscription' ? (
+					<NumberStepperInput
+						min={0}
+						value={createSubTargetIntervalSec}
+						onChange={(e) => {
+							const next = Number(e.target.value)
+							setCreateSubTargetIntervalSec(Number.isFinite(next) ? Math.max(0, Math.round(next)) : 0)
+						}}
+						required
+					/>
+				  ) : (
+					<NumberStepperInput key={`interval-${createType}`} name="interval_sec" defaultValue={60} min={10} required />
+				  )}
 				</label>
 				<label>
 				  超时(ms)
-				  <input name="timeout_ms" type="number" defaultValue={5000} min={200} required />
+				  {createType === 'subscription' ? (
+					<NumberStepperInput
+						min={200}
+						value={createSubTargetTimeoutMS}
+						onChange={(e) => {
+							const next = Number(e.target.value)
+							setCreateSubTargetTimeoutMS(Number.isFinite(next) ? Math.max(200, Math.round(next)) : 5000)
+						}}
+						required
+					/>
+				  ) : (
+					<NumberStepperInput name="timeout_ms" defaultValue={5000} min={200} required />
+				  )}
 				</label>
 			  </div>
 			) : null}
@@ -1928,8 +2139,12 @@ function TargetDetailPage({ token }: { token: string }) {
 		setError('订阅拉取重试次数不能小于 0')
 		return
 	}
-	if (editForm.type === 'subscription' && editForm.latency_interval_sec <= 0) {
-		setError('自动测速间隔必须大于 0')
+	if (editForm.type === 'subscription' && editForm.latency_interval_sec < 0) {
+		setError('自动测速间隔不能小于 0（0 表示不定时测速）')
+		return
+	}
+	if (editForm.type === 'subscription' && editForm.interval_sec < 0) {
+		setError('订阅拉取间隔不能小于 0（0 表示不定时拉取）')
 		return
 	}
 	if (editForm.type === 'subscription' && (editForm.weight_domestic < 0 || editForm.weight_overseas < 0 || (editForm.weight_domestic + editForm.weight_overseas) <= 0)) {
@@ -2761,7 +2976,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				{refreshingLatency ? '测速中...' : '刷新测速'}
 			  </button>
 			</div>
-			<p className="muted">测速配置：并发 {subscriptionConfig.latency_concurrency}，基线超时 {subscriptionConfig.latency_timeout_ms}ms，E2E超时 {subscriptionConfig.e2e_timeout_ms}ms，拉取超时 {subscriptionConfig.fetch_timeout_ms}ms（重试 {subscriptionConfig.fetch_retries}），探测 {subscriptionConfig.latency_probe_count} 次，间隔 {subscriptionConfig.latency_interval_sec}s，国内权重 {subscriptionConfig.weight_domestic.toFixed(2)}，海外权重 {subscriptionConfig.weight_overseas.toFixed(2)}</p>
+			<p className="muted">测速配置：并发 {subscriptionConfig.latency_concurrency}，基线超时 {subscriptionConfig.latency_timeout_ms}ms，E2E超时 {subscriptionConfig.e2e_timeout_ms}ms，拉取超时 {subscriptionConfig.fetch_timeout_ms}ms（重试 {subscriptionConfig.fetch_retries}），探测 {subscriptionConfig.latency_probe_count} 次，间隔 {subscriptionConfig.latency_interval_sec > 0 ? `${subscriptionConfig.latency_interval_sec}s` : '不定时'}，国内权重 {subscriptionConfig.weight_domestic.toFixed(2)}，海外权重 {subscriptionConfig.weight_overseas.toFixed(2)}</p>
 			{refreshingLatency && latencyJobProgress ? (
 			  <div className="subscription-progress">
 				<p className="muted">测速进度：{latencyJobProgress.done}/{latencyJobProgress.total}（{latencyProgressPercent}%），成功 {latencyJobProgress.success}，失败 {latencyJobProgress.failed}</p>
@@ -2975,8 +3190,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				<div className="form-row">
 				  <label>
 					测速并发（大于等于1）
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={1}
 					  value={editForm.latency_concurrency}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_concurrency: Number(e.target.value) || 1 }))}
@@ -2985,8 +3199,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  </label>
 				  <label>
 					测速超时(ms)
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={100}
 					  value={editForm.latency_timeout_ms}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_timeout_ms: Number(e.target.value) || 1200 }))}
@@ -2995,8 +3208,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  </label>
 				  <label>
 					E2E超时(ms)
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={500}
 					  value={editForm.e2e_timeout_ms}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, e2e_timeout_ms: Number(e.target.value) || 6000 }))}
@@ -3005,8 +3217,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  </label>
 				  <label>
 					订阅拉取超时(ms)
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={1000}
 					  value={editForm.fetch_timeout_ms}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_timeout_ms: Number(e.target.value) || 20000 }))}
@@ -3015,8 +3226,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  </label>
 				  <label>
 					拉取重试次数
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={0}
 					  max={5}
 					  value={editForm.fetch_retries}
@@ -3026,8 +3236,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  </label>
 				  <label>
 					单节点探测次数
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={1}
 					  value={editForm.latency_probe_count}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_probe_count: Number(e.target.value) || 3 }))}
@@ -3035,21 +3244,22 @@ function TargetDetailPage({ token }: { token: string }) {
 					/>
 				  </label>
 				  <label>
-					自动测速间隔(秒)
-					<input
-					  type="number"
-					  min={10}
+					自动测速间隔(秒，0=不定时)
+					<NumberStepperInput
+					  min={0}
 					  value={editForm.latency_interval_sec}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_interval_sec: Number(e.target.value) || 300 }))}
+					  onChange={(e) => {
+						const next = Number(e.target.value)
+						setEditForm((prev) => ({ ...prev, latency_interval_sec: Number.isFinite(next) ? Math.max(0, Math.round(next)) : 0 }))
+					  }}
 					  required
 					/>
 				  </label>
 				  <label>
 					国内权重
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={0}
-					  step="0.1"
+					  step={0.1}
 					  value={editForm.weight_domestic}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, weight_domestic: Math.max(0, Number(e.target.value) || 0) }))}
 					  required
@@ -3057,10 +3267,9 @@ function TargetDetailPage({ token }: { token: string }) {
 				  </label>
 				  <label>
 					海外权重
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={0}
-					  step="0.1"
+					  step={0.1}
 					  value={editForm.weight_overseas}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, weight_overseas: Math.max(0, Number(e.target.value) || 0) }))}
 					  required
@@ -3188,8 +3397,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				  </label>
 				  <label>
 					超过多久无上报判定失活(分钟)
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={0}
 					  value={editForm.inactive_threshold_min}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, inactive_threshold_min: Math.max(0, Number(e.target.value) || 0) }))}
@@ -3201,19 +3409,24 @@ function TargetDetailPage({ token }: { token: string }) {
 			  {editForm.type !== 'tracking' ? (
 				<div className="form-row">
 				  <label>
-					间隔(秒)
-					<input
-					  type="number"
-					  min={10}
+					{editForm.type === 'subscription' ? '订阅拉取间隔(秒，0=不定时)' : '间隔(秒)'}
+					<NumberStepperInput
+					  min={editForm.type === 'subscription' ? 0 : 10}
 					  value={editForm.interval_sec}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, interval_sec: Number(e.target.value) || 60 }))}
+					  onChange={(e) => {
+						const next = Number(e.target.value)
+						if (!Number.isFinite(next)) return
+						setEditForm((prev) => ({
+							...prev,
+							interval_sec: prev.type === 'subscription' ? Math.max(0, Math.round(next)) : Math.max(10, Math.round(next)),
+						}))
+					  }}
 					  required
 					/>
 				  </label>
 				  <label>
 					超时(ms)
-					<input
-					  type="number"
+					<NumberStepperInput
 					  min={200}
 					  value={editForm.timeout_ms}
 					  onChange={(e) => setEditForm((prev) => ({ ...prev, timeout_ms: Number(e.target.value) || 5000 }))}

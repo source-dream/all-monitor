@@ -17,6 +17,11 @@ import (
 type Handler struct {
 	Auth   *service.AuthService
 	Target *service.TargetService
+	Pref   *service.PreferenceService
+}
+
+type preferenceDefaultsUpdateRequest struct {
+	Values map[string]any `json:"values"`
 }
 
 type trackingIngestRequest struct {
@@ -240,6 +245,70 @@ func (h *Handler) UpdateTarget(c *gin.Context) {
 	}
 
 	response.OK(c, gin.H{"updated": true})
+}
+
+func (h *Handler) GetPreferenceDefaults(c *gin.Context) {
+	uid, ok := currentUserID(c)
+	if !ok {
+		response.Err(c, 401, 40102, "invalid token")
+		return
+	}
+	scope := strings.TrimSpace(c.Param("scope"))
+	if !isSupportedPreferenceScope(scope) {
+		response.Err(c, 400, 40001, "unsupported preference scope")
+		return
+	}
+	if h.Pref == nil {
+		response.Err(c, 500, 50040, "preference service unavailable")
+		return
+	}
+	defaults := defaultPreferenceValues(scope)
+	stored, err := h.Pref.GetDefaults(uid, scope)
+	if err != nil {
+		response.Err(c, 500, 50040, "load preference defaults failed")
+		return
+	}
+	values := defaults
+	updatedAt := ""
+	if stored != nil {
+		values = normalizePreferenceValues(scope, mergePreferenceValues(defaults, stored.Values))
+		updatedAt = stored.UpdatedAt
+	}
+	response.OK(c, gin.H{
+		"scope":      scope,
+		"version":    1,
+		"values":     values,
+		"updated_at": updatedAt,
+	})
+}
+
+func (h *Handler) UpdatePreferenceDefaults(c *gin.Context) {
+	uid, ok := currentUserID(c)
+	if !ok {
+		response.Err(c, 401, 40102, "invalid token")
+		return
+	}
+	scope := strings.TrimSpace(c.Param("scope"))
+	if !isSupportedPreferenceScope(scope) {
+		response.Err(c, 400, 40001, "unsupported preference scope")
+		return
+	}
+	if h.Pref == nil {
+		response.Err(c, 500, 50040, "preference service unavailable")
+		return
+	}
+	var req preferenceDefaultsUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Err(c, 400, 40001, "invalid request")
+		return
+	}
+	normalized := normalizePreferenceValues(scope, req.Values)
+	stored, err := h.Pref.SetDefaults(uid, scope, normalized)
+	if err != nil {
+		response.Err(c, 500, 50041, "save preference defaults failed")
+		return
+	}
+	response.OK(c, stored)
 }
 
 func normalizeTargetType(raw string) string {
@@ -723,8 +792,8 @@ func normalizeSubscriptionConfig(raw string) (string, error) {
 	if cfg.LatencyProbeCount <= 0 {
 		cfg.LatencyProbeCount = 3
 	}
-	if cfg.LatencyIntervalSec <= 0 {
-		cfg.LatencyIntervalSec = 300
+	if cfg.LatencyIntervalSec < 0 {
+		cfg.LatencyIntervalSec = 0
 	}
 	if cfg.WeightDomestic < 0 || cfg.WeightOverseas < 0 || (cfg.WeightDomestic+cfg.WeightOverseas) <= 0 {
 		cfg.WeightDomestic = 0.3
@@ -758,4 +827,228 @@ func normalizeSubscriptionConfig(raw string) (string, error) {
 	}
 	normalized, _ := json.Marshal(cfg)
 	return string(normalized), nil
+}
+
+func currentUserID(c *gin.Context) (uint, bool) {
+	raw, ok := c.Get("uid")
+	if !ok {
+		return 0, false
+	}
+	uid, ok := raw.(uint)
+	if !ok || uid == 0 {
+		return 0, false
+	}
+	return uid, true
+}
+
+func isSupportedPreferenceScope(scope string) bool {
+	return scope == "subscription_create"
+}
+
+func defaultPreferenceValues(scope string) map[string]any {
+	switch scope {
+	case "subscription_create":
+		return map[string]any{
+			"latency_concurrency":  20,
+			"latency_timeout_ms":   1200,
+			"e2e_timeout_ms":       6000,
+			"fetch_timeout_ms":     20000,
+			"fetch_retries":        2,
+			"fetch_proxy_url":      "",
+			"fetch_user_agent":     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+			"fetch_cookie":         "",
+			"latency_probe_count":  3,
+			"latency_interval_sec": 300,
+			"weight_domestic":      0.3,
+			"weight_overseas":      0.7,
+			"probe_urls_domestic":  []string{"https://connectivitycheck.platform.hicloud.com/generate_204", "https://www.qq.com/favicon.ico"},
+			"probe_urls_overseas":  []string{"https://www.google.com/generate_204", "https://cp.cloudflare.com/generate_204"},
+			"singbox_path":         "sing-box",
+			"interval_sec":         0,
+			"timeout_ms":           5000,
+		}
+	default:
+		return map[string]any{}
+	}
+}
+
+func mergePreferenceValues(defaults map[string]any, custom map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range defaults {
+		out[k] = v
+	}
+	for k, v := range custom {
+		out[k] = v
+	}
+	return out
+}
+
+func normalizePreferenceValues(scope string, values map[string]any) map[string]any {
+	switch scope {
+	case "subscription_create":
+		return normalizeSubscriptionCreateDefaults(values)
+	default:
+		return map[string]any{}
+	}
+}
+
+func normalizeSubscriptionCreateDefaults(values map[string]any) map[string]any {
+	defaults := defaultPreferenceValues("subscription_create")
+	latencyConcurrency := normalizePositiveInt(values["latency_concurrency"], defaults["latency_concurrency"].(int))
+	latencyTimeoutMS := normalizePositiveInt(values["latency_timeout_ms"], defaults["latency_timeout_ms"].(int))
+	e2eTimeoutMS := normalizePositiveInt(values["e2e_timeout_ms"], defaults["e2e_timeout_ms"].(int))
+	fetchTimeoutMS := normalizePositiveInt(values["fetch_timeout_ms"], defaults["fetch_timeout_ms"].(int))
+	fetchRetries := normalizeRangeInt(values["fetch_retries"], defaults["fetch_retries"].(int), 0, 5)
+	latencyProbeCount := normalizePositiveInt(values["latency_probe_count"], defaults["latency_probe_count"].(int))
+	latencyIntervalSec := normalizeNonNegativeInt(values["latency_interval_sec"], defaults["latency_interval_sec"].(int))
+	intervalSec := normalizeNonNegativeInt(values["interval_sec"], defaults["interval_sec"].(int))
+	timeoutMS := normalizePositiveInt(values["timeout_ms"], defaults["timeout_ms"].(int))
+	fetchProxyURL := strings.TrimSpace(normalizeString(values["fetch_proxy_url"], defaults["fetch_proxy_url"].(string)))
+	fetchUserAgent := strings.TrimSpace(normalizeString(values["fetch_user_agent"], defaults["fetch_user_agent"].(string)))
+	if fetchUserAgent == "" {
+		fetchUserAgent = defaults["fetch_user_agent"].(string)
+	}
+	fetchCookie := strings.TrimSpace(normalizeString(values["fetch_cookie"], defaults["fetch_cookie"].(string)))
+	singBoxPath := strings.TrimSpace(normalizeString(values["singbox_path"], defaults["singbox_path"].(string)))
+	if singBoxPath == "" {
+		singBoxPath = defaults["singbox_path"].(string)
+	}
+	wd := normalizeNonNegativeFloat(values["weight_domestic"], defaults["weight_domestic"].(float64))
+	wo := normalizeNonNegativeFloat(values["weight_overseas"], defaults["weight_overseas"].(float64))
+	if wd+wo <= 0 {
+		wd = defaults["weight_domestic"].(float64)
+		wo = defaults["weight_overseas"].(float64)
+	}
+	sum := wd + wo
+	wd = wd / sum
+	wo = wo / sum
+	domesticURLs := normalizePreferenceURLs(values["probe_urls_domestic"], defaults["probe_urls_domestic"].([]string))
+	overseasURLs := normalizePreferenceURLs(values["probe_urls_overseas"], defaults["probe_urls_overseas"].([]string))
+
+	return map[string]any{
+		"latency_concurrency":  latencyConcurrency,
+		"latency_timeout_ms":   latencyTimeoutMS,
+		"e2e_timeout_ms":       e2eTimeoutMS,
+		"fetch_timeout_ms":     fetchTimeoutMS,
+		"fetch_retries":        fetchRetries,
+		"fetch_proxy_url":      fetchProxyURL,
+		"fetch_user_agent":     fetchUserAgent,
+		"fetch_cookie":         fetchCookie,
+		"latency_probe_count":  latencyProbeCount,
+		"latency_interval_sec": latencyIntervalSec,
+		"weight_domestic":      wd,
+		"weight_overseas":      wo,
+		"probe_urls_domestic":  domesticURLs,
+		"probe_urls_overseas":  overseasURLs,
+		"singbox_path":         singBoxPath,
+		"interval_sec":         intervalSec,
+		"timeout_ms":           timeoutMS,
+	}
+}
+
+func normalizeString(raw any, fallback string) string {
+	s, ok := raw.(string)
+	if !ok {
+		return fallback
+	}
+	return s
+}
+
+func normalizePositiveInt(raw any, fallback int) int {
+	n := toInt(raw)
+	if n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+func normalizeNonNegativeInt(raw any, fallback int) int {
+	n := toInt(raw)
+	if n < 0 {
+		return fallback
+	}
+	return n
+}
+
+func normalizeRangeInt(raw any, fallback int, min int, max int) int {
+	n := toInt(raw)
+	if n < min {
+		n = fallback
+	}
+	if n > max {
+		n = max
+	}
+	if n < min {
+		n = min
+	}
+	return n
+}
+
+func normalizeNonNegativeFloat(raw any, fallback float64) float64 {
+	n := toFloat(raw)
+	if n < 0 {
+		return fallback
+	}
+	return n
+}
+
+func normalizePreferenceURLs(raw any, fallback []string) []string {
+	arr, ok := raw.([]any)
+	if !ok {
+		if rows, ok := raw.([]string); ok {
+			arr = make([]any, 0, len(rows))
+			for _, row := range rows {
+				arr = append(arr, row)
+			}
+		} else {
+			return append([]string{}, fallback...)
+		}
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		s, ok := item.(string)
+		if !ok {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return append([]string{}, fallback...)
+	}
+	return out
+}
+
+func toInt(raw any) int {
+	switch v := raw.(type) {
+	case int:
+		return v
+	case int32:
+		return int(v)
+	case int64:
+		return int(v)
+	case float32:
+		return int(v)
+	case float64:
+		return int(v)
+	default:
+		return 0
+	}
+}
+
+func toFloat(raw any) float64 {
+	switch v := raw.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	default:
+		return 0
+	}
 }
