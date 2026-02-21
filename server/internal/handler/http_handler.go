@@ -793,6 +793,21 @@ func (h *Handler) SubscriptionNodeCheckNow(c *gin.Context) {
 	response.OK(c, data)
 }
 
+func (h *Handler) SubscriptionNodeDelete(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		response.Err(c, 400, 40003, "invalid id")
+		return
+	}
+	uid := c.Param("uid")
+	data, err := h.Target.SubscriptionNodeDeleteFromGroup(uint(id), uid)
+	if err != nil {
+		response.Err(c, 400, 40001, err.Error())
+		return
+	}
+	response.OK(c, data)
+}
+
 type subscriptionConfigPayload struct {
 	LatencyConcurrency int      `json:"latency_concurrency"`
 	LatencyTimeoutMS   int      `json:"latency_timeout_ms"`

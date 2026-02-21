@@ -156,6 +156,7 @@ type SubscriptionNode = {
 	last_fail_reason?: string
 	last_error_msg?: string
 	last_latency_checked_at?: string
+	raw_json?: string
 }
 
 type SubscriptionNodeCheck = {
@@ -335,6 +336,7 @@ function resolveAPIBase(): string {
 
 const API_BASE = resolveAPIBase()
 const NODE_VIRTUAL_THRESHOLD = 800
+const NODE_DEFAULT_PAGE_SIZE = 100
 const SUBSCRIPTION_CREATE_SCOPE = 'subscription_create'
 const SUBSCRIPTION_CREATE_DEFAULTS: SubscriptionCreateDefaults = {
 	latency_concurrency: 20,
@@ -901,6 +903,26 @@ function nodeLatencyState(node: SubscriptionNode): 'pending' | 'degraded' | 'err
 		return 'error'
 	}
 	return 'pending'
+}
+
+function isSubscriptionNodeAvailable(node: SubscriptionNode): boolean {
+	const state = nodeLatencyState(node)
+	return state === 'fast' || state === 'good' || state === 'slow' || state === 'bad'
+}
+
+function subscriptionNodeCopyText(node: SubscriptionNode): string {
+	if (node.raw_json) {
+		try {
+			const parsed = JSON.parse(node.raw_json) as Record<string, unknown>
+			const uri = typeof parsed.uri === 'string' ? parsed.uri.trim() : ''
+			if (uri) return uri
+		} catch {
+			// ignore invalid raw_json
+		}
+	}
+	const endpoint = node.port > 0 ? `${node.server}:${node.port}` : node.server
+	const title = node.name?.trim() || node.node_uid
+	return `${title}\n${node.protocol || '-'}://${endpoint}`
 }
 
 function generateWriteKey(): string {
@@ -1960,7 +1982,7 @@ function DashboardPage({
   )
 }
 
-function TargetDetailPage({ token }: { token: string }) {
+function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotifier }) {
   useWorkspaceScrollbar()
   const navigate = useNavigate()
   const params = useParams()
@@ -1976,10 +1998,15 @@ function TargetDetailPage({ token }: { token: string }) {
   const [subscriptionNodes, setSubscriptionNodes] = useState<SubscriptionNode[]>([])
   const [subscriptionSeries, setSubscriptionSeries] = useState<SubscriptionSeriesPoint[]>([])
   const [subscriptionSort, setSubscriptionSort] = useState<'source' | 'latency' | 'name'>('source')
+  const [subscriptionAvailabilityFilter, setSubscriptionAvailabilityFilter] = useState<'all' | 'available' | 'unavailable'>('all')
   const [subscriptionSearch, setSubscriptionSearch] = useState('')
   const [refreshingLatency, setRefreshingLatency] = useState(false)
   const [refreshingNodeMap, setRefreshingNodeMap] = useState<Record<string, boolean>>({})
   const [latencyJobProgress, setLatencyJobProgress] = useState<SubscriptionLatencyJobStatus | null>(null)
+  const [subscriptionPaginationEnabled, setSubscriptionPaginationEnabled] = useState(false)
+  const [subscriptionPaginationTouched, setSubscriptionPaginationTouched] = useState(false)
+  const [subscriptionPageSize, setSubscriptionPageSize] = useState(NODE_DEFAULT_PAGE_SIZE)
+  const [subscriptionPage, setSubscriptionPage] = useState(1)
   const [subscriptionRenderCount, setSubscriptionRenderCount] = useState(400)
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [error, setError] = useState('')
@@ -1991,6 +2018,8 @@ function TargetDetailPage({ token }: { token: string }) {
   const [showAddNodeModal, setShowAddNodeModal] = useState(false)
   const [nodeImportText, setNodeImportText] = useState('')
   const [importingNodes, setImportingNodes] = useState(false)
+  const [pendingDeleteNode, setPendingDeleteNode] = useState<SubscriptionNode | null>(null)
+  const [deletingNodeFromCard, setDeletingNodeFromCard] = useState(false)
   const [rangePreset, setRangePreset] = useState<'1h' | '6h' | '12h' | '24h' | 'custom'>('24h')
   const [customStart, setCustomStart] = useState<Date | null>(new Date(Date.now() - 24 * 60 * 60 * 1000))
   const [customEnd, setCustomEnd] = useState<Date | null>(new Date())
@@ -2146,6 +2175,12 @@ function TargetDetailPage({ token }: { token: string }) {
   }, [id])
 
   useEffect(() => {
+	setSubscriptionPaginationTouched(false)
+	setSubscriptionPaginationEnabled(false)
+	setSubscriptionPage(1)
+  }, [id])
+
+  useEffect(() => {
 	if (editing || saving || deleting) return
 	const timer = window.setInterval(() => {
 		void loadDetail()
@@ -2195,9 +2230,44 @@ function TargetDetailPage({ token }: { token: string }) {
 	void loadSubscriptionSeries().catch((err) => setError((err as Error).message))
   }, [id, target?.type, token, rangePreset, customStart, customEnd])
 
+  const filteredSubscriptionNodes = useMemo(() => {
+	if (subscriptionAvailabilityFilter === 'all') return subscriptionNodes
+	const wantAvailable = subscriptionAvailabilityFilter === 'available'
+	return subscriptionNodes.filter((node) => isSubscriptionNodeAvailable(node) === wantAvailable)
+  }, [subscriptionNodes, subscriptionAvailabilityFilter])
+
   useEffect(() => {
-	if (subscriptionNodes.length <= NODE_VIRTUAL_THRESHOLD) {
-		setSubscriptionRenderCount(subscriptionNodes.length)
+	if (target?.type !== 'subscription' && target?.type !== 'node_group') return
+	if (subscriptionPaginationTouched) return
+	setSubscriptionPaginationEnabled(subscriptionNodes.length > NODE_VIRTUAL_THRESHOLD)
+  }, [subscriptionNodes.length, subscriptionPaginationTouched, target?.type])
+
+  useEffect(() => {
+	setSubscriptionPage(1)
+  }, [subscriptionSearch, subscriptionSort, subscriptionAvailabilityFilter, subscriptionPageSize])
+
+  const subscriptionTotalPages = useMemo(() => {
+	if (!subscriptionPaginationEnabled) return 1
+	return Math.max(1, Math.ceil(filteredSubscriptionNodes.length / subscriptionPageSize))
+  }, [filteredSubscriptionNodes.length, subscriptionPageSize, subscriptionPaginationEnabled])
+
+  useEffect(() => {
+	setSubscriptionPage((prev) => Math.min(Math.max(1, prev), subscriptionTotalPages))
+  }, [subscriptionTotalPages])
+
+  const pagedSubscriptionNodes = useMemo(() => {
+	if (!subscriptionPaginationEnabled) return filteredSubscriptionNodes
+	const start = (subscriptionPage - 1) * subscriptionPageSize
+	return filteredSubscriptionNodes.slice(start, start + subscriptionPageSize)
+  }, [filteredSubscriptionNodes, subscriptionPage, subscriptionPageSize, subscriptionPaginationEnabled])
+
+  useEffect(() => {
+	if (subscriptionPaginationEnabled) {
+		setSubscriptionRenderCount(filteredSubscriptionNodes.length)
+		return
+	}
+	if (filteredSubscriptionNodes.length <= NODE_VIRTUAL_THRESHOLD) {
+		setSubscriptionRenderCount(filteredSubscriptionNodes.length)
 		return
 	}
 	setSubscriptionRenderCount(400)
@@ -2205,9 +2275,9 @@ function TargetDetailPage({ token }: { token: string }) {
 	const step = () => {
 		if (cancelled) return
 		setSubscriptionRenderCount((prev) => {
-			if (prev >= subscriptionNodes.length) return prev
-			const next = Math.min(prev + 400, subscriptionNodes.length)
-			if (next < subscriptionNodes.length) {
+			if (prev >= filteredSubscriptionNodes.length) return prev
+			const next = Math.min(prev + 400, filteredSubscriptionNodes.length)
+			if (next < filteredSubscriptionNodes.length) {
 				setTimeout(step, 16)
 			}
 			return next
@@ -2217,7 +2287,7 @@ function TargetDetailPage({ token }: { token: string }) {
 	return () => {
 		cancelled = true
 	}
-  }, [subscriptionNodes])
+  }, [filteredSubscriptionNodes, subscriptionPaginationEnabled])
 
   async function handleCheckNow() {
     if (!Number.isFinite(id) || id <= 0) return
@@ -2451,13 +2521,13 @@ function TargetDetailPage({ token }: { token: string }) {
 	return Math.min(100, Math.max(0, Math.round((latencyJobProgress.done / latencyJobProgress.total) * 100)))
   }, [latencyJobProgress])
   const visibleSubscriptionNodes = useMemo(() => {
-	if (subscriptionNodes.length <= NODE_VIRTUAL_THRESHOLD) return subscriptionNodes
-	return subscriptionNodes.slice(0, subscriptionRenderCount)
-  }, [subscriptionNodes, subscriptionRenderCount])
+	if (subscriptionPaginationEnabled) return pagedSubscriptionNodes
+	if (filteredSubscriptionNodes.length <= NODE_VIRTUAL_THRESHOLD) return filteredSubscriptionNodes
+	return filteredSubscriptionNodes.slice(0, subscriptionRenderCount)
+  }, [filteredSubscriptionNodes, pagedSubscriptionNodes, subscriptionPaginationEnabled, subscriptionRenderCount])
   const availableSubscriptionCount = useMemo(() => {
 	return subscriptionNodes.reduce((count, node) => {
-		const state = nodeLatencyState(node)
-		if (state === 'fast' || state === 'good' || state === 'slow' || state === 'bad') return count + 1
+		if (isSubscriptionNodeAvailable(node)) return count + 1
 		return count
 	}, 0)
   }, [subscriptionNodes])
@@ -2608,6 +2678,35 @@ function TargetDetailPage({ token }: { token: string }) {
 	  setRefreshingLatency(false)
 	}
   }
+
+	async function handleCopySubscriptionNode(node: SubscriptionNode) {
+	const text = subscriptionNodeCopyText(node)
+	try {
+		await navigator.clipboard.writeText(text)
+		notify.success('节点已复制')
+	} catch {
+		notify.error('复制失败，请检查剪贴板权限')
+	}
+  }
+
+	async function handleDeleteNodeFromCard(node: SubscriptionNode, skipConfirm: boolean) {
+		if (!isNodeGroupTarget) return
+		setDeletingNodeFromCard(true)
+		try {
+			await api(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(node.node_uid)}`, { method: 'DELETE' }, token)
+			notify.success(skipConfirm ? '节点已删除（已跳过确认）' : '节点已删除')
+			setPendingDeleteNode(null)
+			await Promise.all([
+				loadSubscriptionNodes(),
+				loadSubscriptionSeries(),
+				api<SubscriptionSummary>(`/api/targets/${id}/subscription/summary`, undefined, token).then(setSubscriptionSummary),
+			])
+		} catch (err) {
+			notify.error((err as Error).message || '删除节点失败')
+		} finally {
+			setDeletingNodeFromCard(false)
+		}
+	}
 
   async function handleImportNodeGroupURIs() {
 	if (!target || target.type !== 'node_group') return
@@ -3158,7 +3257,7 @@ function TargetDetailPage({ token }: { token: string }) {
 				<span>可用 {availableSubscriptionCount}/{subscriptionNodes.length}</span>
 				{isNodeGroupTarget ? (
 				  <button type="button" onClick={() => {
-					setNodeImportText(subscriptionConfig.node_uris.join('\n'))
+					setNodeImportText('')
 					setShowAddNodeModal(true)
 				  }}>
 					<Plus size={14} /> 添加节点
@@ -3172,9 +3271,25 @@ function TargetDetailPage({ token }: { token: string }) {
 				<button type="button" className={`chip ${subscriptionSort === 'source' ? 'active' : ''}`} onClick={() => setSubscriptionSort('source')}>源顺序</button>
 				<button type="button" className={`chip ${subscriptionSort === 'latency' ? 'active' : ''}`} onClick={() => setSubscriptionSort('latency')}>延迟</button>
 				<button type="button" className={`chip ${subscriptionSort === 'name' ? 'active' : ''}`} onClick={() => setSubscriptionSort('name')}>名称</button>
+				<button type="button" className={`chip ${subscriptionAvailabilityFilter === 'all' ? 'active' : ''}`} onClick={() => setSubscriptionAvailabilityFilter('all')}>全部</button>
+				<button type="button" className={`chip ${subscriptionAvailabilityFilter === 'available' ? 'active' : ''}`} onClick={() => setSubscriptionAvailabilityFilter('available')}>仅可用</button>
+				<button type="button" className={`chip ${subscriptionAvailabilityFilter === 'unavailable' ? 'active' : ''}`} onClick={() => setSubscriptionAvailabilityFilter('unavailable')}>仅不可用</button>
 			  </div>
 			  <button type="button" onClick={() => void handleRefreshSubscriptionLatency()} disabled={refreshingLatency}>
 				{refreshingLatency ? '测速中...' : '刷新测速'}
+			  </button>
+			</div>
+			<div className="subscription-node-controls">
+			  <button
+				type="button"
+				className={`chip ${subscriptionPaginationEnabled ? 'active' : ''}`}
+				onClick={() => {
+					setSubscriptionPaginationEnabled((prev) => !prev)
+					setSubscriptionPaginationTouched(true)
+					setSubscriptionPage(1)
+				}}
+			  >
+				分页 {subscriptionPaginationEnabled ? '开' : '关'}
 			  </button>
 			</div>
 			<p className="muted subscription-config-note">{isNodeGroupTarget
@@ -3188,15 +3303,33 @@ function TargetDetailPage({ token }: { token: string }) {
 				</div>
 			  </div>
 			) : null}
-			  {subscriptionNodes.length > NODE_VIRTUAL_THRESHOLD ? (
+			  {!subscriptionPaginationEnabled && filteredSubscriptionNodes.length > NODE_VIRTUAL_THRESHOLD ? (
 			  <p className="muted">节点较多（{subscriptionNodes.length}），已启用增量渲染模式。</p>
 			) : null}
 			<div className={`subscription-node-grid ${subscriptionNodes.length > NODE_VIRTUAL_THRESHOLD ? 'compact' : ''}`}>
 			  {visibleSubscriptionNodes.map((row) => {
 				const pending = Boolean(refreshingNodeMap[row.node_uid])
 				const state = pending ? 'pending' : nodeLatencyState(row)
+				const isDeleteShortcut = isNodeGroupTarget
 				return (
-				<article className={`subscription-node-card latency-${state}`} key={row.id} onClick={() => navigate(`/targets/${id}/subscription/nodes/${encodeURIComponent(row.node_uid)}`)}>
+				<article
+				  className={`subscription-node-card latency-${state}`}
+				  key={row.id}
+				  title={isDeleteShortcut ? '左键查看详情，右键复制；Alt+右键删除，Ctrl+Alt+右键直接删除' : '左键查看详情，右键复制节点'}
+				  onClick={() => navigate(`/targets/${id}/subscription/nodes/${encodeURIComponent(row.node_uid)}`)}
+				  onContextMenu={(event) => {
+					event.preventDefault()
+					if (isDeleteShortcut && event.altKey) {
+						if (event.ctrlKey) {
+							void handleDeleteNodeFromCard(row, true)
+						} else {
+							setPendingDeleteNode(row)
+						}
+						return
+					}
+					void handleCopySubscriptionNode(row)
+				  }}
+				>
 				  <div className="subscription-node-head">
 					<strong>{row.name}</strong>
 					<span className="muted">{row.protocol || '-'}</span>
@@ -3215,6 +3348,26 @@ function TargetDetailPage({ token }: { token: string }) {
 				</article>
 			  )})}
 			</div>
+			{subscriptionPaginationEnabled && filteredSubscriptionNodes.length > 0 ? (
+			  <div className="subscription-node-pagination">
+				<span className="subscription-page-size">每页</span>
+				<div className="type-chips subscription-page-size-chips">
+				  {[50, 100, 200].map((size) => (
+					<button
+					  key={size}
+					  type="button"
+					  className={`chip ${subscriptionPageSize === size ? 'active' : ''}`}
+					  onClick={() => setSubscriptionPageSize(size)}
+					>
+					  {size}
+					</button>
+				  ))}
+				</div>
+				<button type="button" onClick={() => setSubscriptionPage((prev) => Math.max(1, prev - 1))} disabled={subscriptionPage <= 1}>上一页</button>
+				<span className="muted">第 {subscriptionPage}/{subscriptionTotalPages} 页</span>
+				<button type="button" onClick={() => setSubscriptionPage((prev) => Math.min(subscriptionTotalPages, prev + 1))} disabled={subscriptionPage >= subscriptionTotalPages}>下一页</button>
+			  </div>
+			) : null}
 			{subscriptionNodes.length === 0 ? <p className="muted">暂无节点数据</p> : null}
 		  </article>
 		) : null}
@@ -3701,6 +3854,26 @@ function TargetDetailPage({ token }: { token: string }) {
 		</div>
 	  ) : null}
 
+	  {pendingDeleteNode ? (
+		<div className="overlay" role="dialog" aria-modal="true">
+		  <div className="confirm-card panel">
+			<h3>确认删除该节点？</h3>
+			<p className="muted">节点「{pendingDeleteNode.name || pendingDeleteNode.node_uid}」将从当前节点组移除，删除后不可恢复。</p>
+			<div className="confirm-actions">
+			  <button type="button" onClick={() => setPendingDeleteNode(null)} disabled={deletingNodeFromCard}>取消</button>
+			  <button
+				type="button"
+				className="danger-btn"
+				onClick={() => void handleDeleteNodeFromCard(pendingDeleteNode, false)}
+				disabled={deletingNodeFromCard}
+			  >
+				{deletingNodeFromCard ? '删除中...' : '确认删除'}
+			  </button>
+			</div>
+		  </div>
+		</div>
+	  ) : null}
+
       {confirmDelete ? (
         <div className="overlay" role="dialog" aria-modal="true">
           <div className="confirm-card panel">
@@ -3719,7 +3892,7 @@ function TargetDetailPage({ token }: { token: string }) {
   )
 }
 
-function SubscriptionNodeDetailPage({ token }: { token: string }) {
+function SubscriptionNodeDetailPage({ token, notify, theme }: { token: string; notify: ToastNotifier; theme: ThemeMode }) {
 	useWorkspaceScrollbar()
 	const navigate = useNavigate()
 	const params = useParams()
@@ -3730,17 +3903,22 @@ function SubscriptionNodeDetailPage({ token }: { token: string }) {
 	const [summary, setSummary] = useState<SubscriptionNodeSummary | null>(null)
 	const [series, setSeries] = useState<SubscriptionNodeSeriesPoint[]>([])
 	const [logs, setLogs] = useState<SubscriptionNodeCheck[]>([])
+	const [isNodeGroupTarget, setIsNodeGroupTarget] = useState(false)
+	const [confirmDeleteNode, setConfirmDeleteNode] = useState(false)
+	const [deletingNode, setDeletingNode] = useState(false)
 
 	async function load() {
 		if (!Number.isFinite(id) || id <= 0 || !uid) return
 		setLoading(true)
 		setError('')
 		try {
-			const [s, se, lg] = await Promise.all([
+			const [targetData, s, se, lg] = await Promise.all([
+				api<Target>(`/api/targets/${id}`, undefined, token),
 				api<SubscriptionNodeSummary>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/summary`, undefined, token),
 				api<SubscriptionNodeSeriesPoint[]>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/series?hours=24`, undefined, token),
 				api<SubscriptionNodeCheck[]>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/logs?limit=100`, undefined, token),
 			])
+			setIsNodeGroupTarget(targetData.type === 'node_group')
 			setSummary(s)
 			setSeries(se)
 			setLogs(lg)
@@ -3748,6 +3926,24 @@ function SubscriptionNodeDetailPage({ token }: { token: string }) {
 			setError((err as Error).message)
 		} finally {
 			setLoading(false)
+		}
+	}
+
+	async function handleDeleteNode() {
+		if (!isNodeGroupTarget) return
+		setDeletingNode(true)
+		setError('')
+		try {
+			await api(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}`, { method: 'DELETE' }, token)
+			notify.success('节点已删除')
+			navigate(`/targets/${id}`)
+		} catch (err) {
+			const msg = (err as Error).message
+			setError(msg)
+			notify.error(msg || '删除节点失败')
+		} finally {
+			setDeletingNode(false)
+			setConfirmDeleteNode(false)
 		}
 	}
 
@@ -3764,21 +3960,72 @@ function SubscriptionNodeDetailPage({ token }: { token: string }) {
 		}
 	}
 
+	const nodeChartColors = useMemo(() => {
+		if (theme === 'dark') {
+			return {
+				axisLabel: '#94a3b8',
+				axisLine: '#334155',
+				splitLine: 'rgba(148, 163, 184, 0.18)',
+				latencyLine: '#60a5fa',
+				availabilityLine: '#34d399',
+			}
+		}
+		return {
+			axisLabel: '#475569',
+			axisLine: '#cbd5e1',
+			splitLine: 'rgba(148, 163, 184, 0.35)',
+			latencyLine: '#2563eb',
+			availabilityLine: '#059669',
+		}
+	}, [theme])
+
 	const latencyOption = useMemo(() => ({
 		backgroundColor: 'transparent',
 		grid: { left: 26, right: 20, top: 26, bottom: 26, containLabel: true },
-		xAxis: { type: 'category', data: series.map((x) => new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) },
-		yAxis: { type: 'value' },
-		series: [{ type: 'line', smooth: true, showSymbol: false, data: series.map((x) => x.latency_ms) }],
-	}), [series])
+		tooltip: {
+			trigger: 'axis',
+			backgroundColor: theme === 'dark' ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.94)',
+			textStyle: { color: nodeChartColors.axisLabel },
+			borderColor: nodeChartColors.axisLine,
+			borderWidth: 1,
+		},
+		xAxis: {
+			type: 'category',
+			data: series.map((x) => new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+			axisLabel: { color: nodeChartColors.axisLabel },
+			axisLine: { lineStyle: { color: nodeChartColors.axisLine } },
+		},
+		yAxis: {
+			type: 'value',
+			axisLabel: { color: nodeChartColors.axisLabel },
+			splitLine: { lineStyle: { color: nodeChartColors.splitLine } },
+		},
+		series: [{ type: 'line', smooth: true, showSymbol: false, lineStyle: { width: 2, color: nodeChartColors.latencyLine }, data: series.map((x) => x.latency_ms) }],
+	}), [series, nodeChartColors, theme])
 
 	const availabilityOption = useMemo(() => ({
 		backgroundColor: 'transparent',
 		grid: { left: 26, right: 20, top: 26, bottom: 26, containLabel: true },
-		xAxis: { type: 'category', data: series.map((x) => new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) },
-		yAxis: { type: 'value', min: 0, max: 100 },
-		series: [{ type: 'line', smooth: true, showSymbol: false, data: series.map((x) => x.availability) }],
-	}), [series])
+		tooltip: {
+			trigger: 'axis',
+			backgroundColor: theme === 'dark' ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.94)',
+			textStyle: { color: nodeChartColors.axisLabel },
+			borderColor: nodeChartColors.axisLine,
+			borderWidth: 1,
+		},
+		xAxis: {
+			type: 'category',
+			data: series.map((x) => new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
+			axisLabel: { color: nodeChartColors.axisLabel },
+			axisLine: { lineStyle: { color: nodeChartColors.axisLine } },
+		},
+		yAxis: {
+			type: 'value', min: 0, max: 100,
+			axisLabel: { color: nodeChartColors.axisLabel },
+			splitLine: { lineStyle: { color: nodeChartColors.splitLine } },
+		},
+		series: [{ type: 'line', smooth: true, showSymbol: false, lineStyle: { width: 2, color: nodeChartColors.availabilityLine }, data: series.map((x) => x.availability) }],
+	}), [series, nodeChartColors, theme])
 
 	return (
 		<div className="workspace detail-workspace">
@@ -3793,6 +4040,11 @@ function SubscriptionNodeDetailPage({ token }: { token: string }) {
 				<div className="header-actions">
 					<button type="button" onClick={() => void load()}><RefreshCcw size={16} /> 刷新</button>
 					<button type="button" className="primary" onClick={() => void handleCheckNow()}><Activity size={16} /> 手动检测</button>
+					{isNodeGroupTarget ? (
+						<button type="button" className="danger-btn" onClick={() => setConfirmDeleteNode(true)}>
+							<Trash2 size={16} /> 删除节点
+						</button>
+					) : null}
 				</div>
 			</header>
 			{error ? <p className="error panel">{error}</p> : null}
@@ -3830,6 +4082,20 @@ function SubscriptionNodeDetailPage({ token }: { token: string }) {
 					</div>
 				</article>
 			</section>
+			{confirmDeleteNode ? (
+				<div className="overlay" role="dialog" aria-modal="true">
+					<div className="confirm-card panel">
+						<h3>确认删除该节点？</h3>
+						<p className="muted">仅会从当前节点组移除该节点，删除后不可恢复。</p>
+						<div className="confirm-actions">
+							<button type="button" onClick={() => setConfirmDeleteNode(false)} disabled={deletingNode}>取消</button>
+							<button type="button" className="danger-btn" onClick={() => void handleDeleteNode()} disabled={deletingNode}>
+								{deletingNode ? '删除中...' : '确认删除'}
+							</button>
+						</div>
+					</div>
+				</div>
+			) : null}
 		</div>
 	)
 }
@@ -4012,8 +4278,8 @@ function App() {
             />
           )}
         />
-        <Route path="/targets/:id" element={<TargetDetailPage token={token} />} />
-        <Route path="/targets/:id/subscription/nodes/:uid" element={<SubscriptionNodeDetailPage token={token} />} />
+		<Route path="/targets/:id" element={<TargetDetailPage token={token} notify={notify} />} />
+		<Route path="/targets/:id/subscription/nodes/:uid" element={<SubscriptionNodeDetailPage token={token} notify={notify} theme={theme} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>

@@ -667,6 +667,65 @@ func (s *TargetService) SubscriptionNodeCheckNow(id uint, nodeUID string) (map[s
 	return map[string]any{"success": errMsg == "", "latency_ms": lat, "error_msg": errMsg}, nil
 }
 
+func (s *TargetService) SubscriptionNodeDeleteFromGroup(id uint, nodeUID string) (map[string]any, error) {
+	uid := strings.TrimSpace(nodeUID)
+	if uid == "" {
+		return nil, errors.New("node uid is required")
+	}
+
+	target, cfg, err := s.getSubscriptionTarget(id)
+	if err != nil {
+		return nil, err
+	}
+	if target.Type != "node_group" {
+		return nil, errors.New("target is not node_group")
+	}
+
+	kept := make([]string, 0, len(cfg.NodeURIs))
+	removed := false
+	for _, raw := range cfg.NodeURIs {
+		uri := strings.TrimSpace(raw)
+		if uri == "" {
+			continue
+		}
+		parsed := parseURIList(uri)
+		if len(parsed) > 0 && parsed[0].UID == uid {
+			removed = true
+			continue
+		}
+		kept = append(kept, uri)
+	}
+	if !removed {
+		return nil, errors.New("node not found in node_group config")
+	}
+
+	cfg.NodeURIs = kept
+	cfg.ManualExpireAt = ""
+	cfgRaw, marshalErr := json.Marshal(cfg)
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+
+	if err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.MonitorTarget{}).
+			Where("id = ?", id).
+			Update("config_json", string(cfgRaw)).Error; err != nil {
+			return err
+		}
+		if err := s.syncManualNodeList(tx, id, string(cfgRaw)); err != nil {
+			return err
+		}
+		if err := tx.Where("target_id = ? AND node_uid = ?", id, uid).Delete(&model.SubscriptionNodeCheck{}).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return map[string]any{"removed": true, "remaining": len(kept)}, nil
+}
+
 func (s *TargetService) RefreshSubscriptionLatency(id uint) (map[string]any, error) {
 	target, cfg, err := s.getSubscriptionTarget(id)
 	if err != nil {

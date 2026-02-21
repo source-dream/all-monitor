@@ -1033,6 +1033,39 @@ input[type='number']::-webkit-inner-spin-button {
   line-height: 1.45;
 }
 
+.subscription-node-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.subscription-page-size {
+  color: var(--text-muted);
+  font-size: 0.86rem;
+}
+
+.subscription-node-pagination {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed color-mix(in srgb, var(--border) 88%, transparent);
+}
+
+.subscription-page-size-chips {
+  gap: 6px;
+}
+
+.subscription-page-size-chips .chip {
+  min-width: 44px;
+  text-align: center;
+}
+
 .logs-list {
   display: grid;
   gap: 8px;
