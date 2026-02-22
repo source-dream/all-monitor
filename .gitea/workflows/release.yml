@@ -4,13 +4,22 @@ on:
   push:
     tags:
       - '*'
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
+    name: Build And Publish
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -23,6 +32,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
 
       - name: Install frontend dependencies
         run: npm --prefix web ci
@@ -35,14 +45,25 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: bash ./scripts/ci-release-package.sh
 
+      - name: Verify release files
+        run: |
+          test -f "dist/all-monitor-${{ github.ref_name }}-linux-amd64.tar.gz"
+          test -f "dist/all-monitor-${{ github.ref_name }}-windows-amd64.zip"
+          test -f "dist/SHA256SUMS-${{ github.ref_name }}.txt"
+
       - name: Publish Gitea release
         env:
-          GITEA_TOKEN: ${{ secrets.token }}
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          TOKEN: ${{ secrets.token }}
           TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
           SERVER_URL: ${{ github.server_url }}
         run: |
           set -euo pipefail
+
+          if [[ -z "${GITEA_TOKEN:-}" && -n "${TOKEN:-}" ]]; then
+            GITEA_TOKEN="${TOKEN}"
+          fi
 
           if [[ -z "${GITEA_TOKEN:-}" ]]; then
             echo "GITEA_TOKEN is required" >&2
@@ -63,6 +84,7 @@ jobs:
 
           upload_url="$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read()).get("upload_url", ""))' <<<"${release_json}")"
           upload_url="${upload_url%%\{*}"
+          existing_assets="$(python3 -c 'import json, sys; obj = json.loads(sys.stdin.read()); print("\n".join(a.get("name", "") for a in obj.get("assets", [])))' <<<"${release_json}")"
 
           if [[ -z "${upload_url}" ]]; then
             echo "failed to resolve upload_url from release response" >&2
@@ -77,6 +99,10 @@ jobs:
 
           for file in "${files[@]}"; do
             name="$(basename "${file}")"
+            if [[ -n "${existing_assets}" ]] && printf '%s\n' "${existing_assets}" | grep -Fxq "${name}"; then
+              echo "[release] skip existing asset ${name}"
+              continue
+            fi
             curl -fsS -X POST "${upload_url}?name=${name}" -H "${auth_header}" -H "Content-Type: application/octet-stream" --data-binary "@${file}" >/dev/null
             echo "[release] uploaded ${name}"
           done
