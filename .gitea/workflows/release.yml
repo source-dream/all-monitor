@@ -37,7 +37,7 @@ jobs:
 
       - name: Publish Gitea release
         env:
-          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          GITEA_TOKEN: ${{ secrets.token }}
           TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
           SERVER_URL: ${{ github.server_url }}
