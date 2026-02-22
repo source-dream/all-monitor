@@ -131,7 +131,7 @@ type parsedSubscriptionNode struct {
 
 func (s *TargetService) CreateTarget(target *model.MonitorTarget) error {
 	return s.DB.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(target).Error; err != nil {
+		if err := tx.Select("Name", "Type", "Endpoint", "IntervalSec", "TimeoutMS", "Enabled", "ConfigJSON").Create(target).Error; err != nil {
 			return err
 		}
 		if target.Type == "node_group" {

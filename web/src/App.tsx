@@ -888,12 +888,20 @@ function DashboardPage({
     e.preventDefault()
     const formEl = e.currentTarget
     const form = new FormData(formEl)
+    const subscriptionIntervalRaw = Number(form.get('interval_sec'))
+    const subscriptionTimeoutRaw = Number(form.get('timeout_ms'))
+    const subscriptionIntervalSec = Number.isFinite(subscriptionIntervalRaw)
+      ? Math.max(0, Math.round(subscriptionIntervalRaw))
+      : createSubTargetIntervalSec
+    const subscriptionTimeoutMS = Number.isFinite(subscriptionTimeoutRaw)
+      ? Math.max(200, Math.round(subscriptionTimeoutRaw))
+      : createSubTargetTimeoutMS
     const payload: CreateTargetPayload = {
       name: String(form.get('name') ?? ''),
       type: createType,
 	  endpoint: createType === 'tracking' ? 'tracking://ingest' : (createType === 'node_group' ? 'node-group://manual' : String(form.get('endpoint') ?? '')),
-	  interval_sec: createType === 'tracking' ? 60 : (createType === 'subscription' ? createSubTargetIntervalSec : (createType === 'node_group' ? 0 : Number(form.get('interval_sec') ?? 60))),
-	  timeout_ms: createType === 'tracking' ? 5000 : (createType === 'subscription' ? createSubTargetTimeoutMS : (createType === 'node_group' ? 5000 : Number(form.get('timeout_ms') ?? 5000))),
+	  interval_sec: createType === 'tracking' ? 60 : (createType === 'subscription' ? subscriptionIntervalSec : (createType === 'node_group' ? 0 : Number(form.get('interval_sec') ?? 60))),
+	  timeout_ms: createType === 'tracking' ? 5000 : (createType === 'subscription' ? subscriptionTimeoutMS : (createType === 'node_group' ? 5000 : Number(form.get('timeout_ms') ?? 5000))),
       enabled: true,
 	  config_json: createType === 'ai'
 		? JSON.stringify({ api_key: createAPIKey.trim() })
@@ -1346,6 +1354,7 @@ function DashboardPage({
 			  {createType === 'subscription' ? '订阅拉取间隔(秒，0=不定时)' : '间隔(秒)'}
 			  {createType === 'subscription' ? (
 					<NumberStepperInput
+						name="interval_sec"
 						min={0}
 						value={createSubTargetIntervalSec}
 						onChange={(e) => {
@@ -1362,6 +1371,7 @@ function DashboardPage({
 				  超时(ms)
 			  {createType === 'subscription' ? (
 					<NumberStepperInput
+						name="timeout_ms"
 						min={200}
 						value={createSubTargetTimeoutMS}
 						onChange={(e) => {

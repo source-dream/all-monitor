@@ -23,7 +23,7 @@ type MonitorTarget struct {
 	Name        string    `gorm:"size:100;not null" json:"name"`
 	Type        string    `gorm:"size:32;index;not null" json:"type"`
 	Endpoint    string    `gorm:"type:text;not null" json:"endpoint"`
-	IntervalSec int       `gorm:"not null;default:60" json:"interval_sec"`
+	IntervalSec int       `gorm:"not null" json:"interval_sec"`
 	TimeoutMS   int       `gorm:"not null;default:5000" json:"timeout_ms"`
 	Enabled     bool      `gorm:"not null;default:true" json:"enabled"`
 	ConfigJSON  string    `gorm:"type:text;default:'{}'" json:"config_json"`
