@@ -9,4 +9,4 @@ if [[ -z "${RELEASE_TAG:-}" ]]; then
 fi
 
 echo "[ci-release] packaging tag: ${RELEASE_TAG}"
-VERSION="${RELEASE_TAG}" "$ROOT_DIR/scripts/release.sh"
+VERSION="${RELEASE_TAG}" bash "$ROOT_DIR/scripts/release.sh"
