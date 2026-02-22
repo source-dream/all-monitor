@@ -10,7 +10,10 @@ import (
 	"all-monitor/server/internal/service"
 	"all-monitor/server/internal/webstatic"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -31,6 +34,10 @@ import (
 )
 
 func main() {
+	if err := ensureDefaultEnvFile(".env"); err != nil {
+		log.Printf("prepare default .env failed: %v", err)
+	}
+
 	// 开发环境优先加载 .env 文件，方便本地直接运行。
 	_ = godotenv.Load()
 
@@ -108,6 +115,35 @@ func main() {
 	if err := r.RunListener(listener); err != nil {
 		log.Fatalf("run server failed: %v", err)
 	}
+}
+
+func ensureDefaultEnvFile(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	jwtSecret, err := generateJWTSecret()
+	if err != nil {
+		return err
+	}
+
+	content := fmt.Sprintf("APP_PORT=8080\nDB_DRIVER=sqlite\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_USER=sqlite\nDB_PASS=sqlite\nDB_NAME=all_monitor\nSQLITE_DSN=data/all-monitor.db\nJWT_SECRET=%s\nCORS_ALLOW=http://localhost:5173,auto\nIP_REGION_DB=data/ip2region.xdb\n", jwtSecret)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return err
+	}
+
+	log.Printf("created default %s", path)
+	return nil
+}
+
+func generateJWTSecret() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func registerEmbeddedWeb(r *gin.Engine) {

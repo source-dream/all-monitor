@@ -72,12 +72,17 @@ jobs:
 
           api_base="${SERVER_URL%/}/api/v1/repos/${REPOSITORY}/releases"
           auth_header="Authorization: token ${GITEA_TOKEN}"
+          if [[ "${TAG}" == *-* ]]; then
+            prerelease_json="true"
+          else
+            prerelease_json="false"
+          fi
 
           release_json=""
           if release_json="$(curl -fsS -H "${auth_header}" "${api_base}/tags/${TAG}" 2>/dev/null)"; then
             echo "[release] found existing release for tag ${TAG}"
           else
-            payload="$(python3 -c 'import json, os; tag = os.environ["TAG"]; print(json.dumps({"tag_name": tag, "name": tag, "draft": False, "prerelease": False}))')"
+            payload="$(PRERELEASE_JSON="${prerelease_json}" python3 -c 'import json, os; tag = os.environ["TAG"]; prerelease = os.environ.get("PRERELEASE_JSON", "false").lower() == "true"; print(json.dumps({"tag_name": tag, "name": tag, "draft": False, "prerelease": prerelease}))')"
             release_json="$(curl -fsS -X POST "${api_base}" -H "${auth_header}" -H "Content-Type: application/json" -d "${payload}")"
             echo "[release] created release for tag ${TAG}"
           fi

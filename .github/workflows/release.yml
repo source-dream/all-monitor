@@ -54,10 +54,20 @@ jobs:
           test -f "dist/all-monitor-${{ github.ref_name }}-windows-amd64.zip"
           test -f "dist/SHA256SUMS-${{ github.ref_name }}.txt"
 
+      - name: Resolve release mode
+        id: release_mode
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
+          prerelease: ${{ steps.release_mode.outputs.prerelease }}
           fail_on_unmatched_files: true
           generate_release_notes: true
           files: |
