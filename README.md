@@ -88,3 +88,22 @@ make clean          # 清理 bin
 - 若传入 `VERSION`，优先使用（例如 `VERSION=v0.1.0 make release`）
 - 否则自动读取 Git：`HEAD tag` -> `latest tag + short sha` -> `snapshot-shortsha`
 - 工作区有未提交改动时会追加 `-dirty`
+
+## CI 自动发布（GitHub + Gitea）
+
+已提供两个工作流：
+- `.github/workflows/release.yml`
+- `.gitea/workflows/release.yml`
+
+触发条件：
+- 推送 tag（如 `v0.1.0`）后自动触发。
+
+发布产物：
+- `all-monitor-<tag>-linux-amd64.tar.gz`
+- `all-monitor-<tag>-windows-amd64.zip`
+- `SHA256SUMS-<tag>.txt`
+
+说明：
+- 产物由 `scripts/ci-release-package.sh` 统一生成，内部调用 `scripts/release.sh`，并将 `VERSION` 固定为当前 tag。
+- GitHub 发布使用 `GITHUB_TOKEN`（默认可用）。
+- Gitea 发布需要仓库密钥 `GITEA_TOKEN`（需有 release 写权限）。

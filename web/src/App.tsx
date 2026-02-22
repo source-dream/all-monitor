@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent, FormEvent, InputHTMLAttributes } from 'react'
 import {
   Activity,
@@ -20,296 +20,45 @@ import Flatpickr from 'react-flatpickr'
 import 'flatpickr/dist/flatpickr.min.css'
 import { Mandarin } from 'flatpickr/dist/l10n/zh.js'
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
-import { useRef } from 'react'
+import { ConfirmDialog } from './components/ui/ConfirmDialog'
+import { ToastViewport } from './components/ui/ToastViewport'
+import { nodeLatencyState, isSubscriptionNodeAvailable, subscriptionNodeCopyText } from './features/subscription/nodeHelpers'
+import { useToastManager } from './hooks/useToastManager'
+import { useWorkspaceScrollbar } from './hooks/useWorkspaceScrollbar'
+import { api, API_BASE, AUTH_EXPIRED_EVENT } from './lib/api'
+import type { ApiBody } from './lib/api'
+import { copyTextToClipboard } from './lib/clipboard'
+import { SubscriptionNodeDetailPage } from './pages/SubscriptionNodeDetailPage'
+import type {
+	CardState,
+	CheckResult,
+	CreateTargetPayload,
+	FinanceSummary,
+	PortProtocol,
+	PreferenceDefaultsPayload,
+	SubscriptionConfig,
+	SubscriptionCreateDefaults,
+	SubscriptionLatencyJobEvent,
+	SubscriptionLatencyJobStatus,
+	SubscriptionNode,
+	SubscriptionSeriesPoint,
+	SubscriptionSummary,
+	Target,
+	TrackingConfig,
+	TrackingEvent,
+	TrackingMetricMode,
+	TrackingSeriesPoint,
+	TrackingStatusInfo,
+	TrackingSummary,
+	UDPMode,
+	UptimeBlock,
+	UserGroupMode,
+	UVIdentity,
+} from './types/api'
+import type { ThemeMode, ToastNotifier } from './types/ui'
 
-type ApiBody<T> = {
-  code: number
-  message: string
-  data: T
-}
-
-const AUTH_EXPIRED_EVENT = 'all_monitor_auth_expired'
 const DEFAULT_SUB_FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 
-type ThemeMode = 'light' | 'dark'
-type ToastType = 'success' | 'error' | 'info' | 'warning'
-
-type ToastMessage = {
-	id: number
-	type: ToastType
-	text: string
-}
-
-type ToastNotifier = {
-	success: (text: string, durationMS?: number) => void
-	error: (text: string, durationMS?: number) => void
-	info: (text: string, durationMS?: number) => void
-	warning: (text: string, durationMS?: number) => void
-}
-
-type Target = {
-  id: number
-  name: string
-  type: string
-  endpoint: string
-  interval_sec: number
-  timeout_ms: number
-  enabled: boolean
-  config_json?: string
-}
-
-type CheckResult = {
-  id: number
-  target_id: number
-  success: boolean
-  latency_ms: number
-  error_msg: string
-  checked_at: string
-}
-
-type CreateTargetPayload = {
-  name: string
-  type: string
-  endpoint: string
-  interval_sec: number
-  timeout_ms: number
-  enabled: boolean
-  config_json: string
-}
-
-type FinanceSummary = {
-	has_data: boolean
-	currency?: string
-	balance?: number
-	used_total?: number
-	limit_amount?: number
-	daily_spent?: number
-	updated_at?: string
-}
-
-type TrackingSummary = {
-	has_data: boolean
-	pv?: number
-	uv?: number
-	last_event_at?: string
-	last_event_name?: string
-	last_event_page?: string
-}
-
-type TrackingEvent = {
-	id: number
-	target_id: number
-	event_name: string
-	page: string
-	count: number
-	client_id: string
-	user_id: string
-	uv_key: string
-	client_ip: string
-	user_agent: string
-	referer: string
-	geo_text: string
-	meta_json: string
-	occurred_at: string
-}
-
-type TrackingSeriesPoint = {
-	bucket: string
-	pv: number
-	uv: number
-}
-
-type SubscriptionSummary = {
-	has_data: boolean
-	reachable?: boolean
-	http_status?: number
-	latency_ms?: number
-	error_msg?: string
-	node_total?: number
-	available_total?: number
-	protocol_stats?: Record<string, number>
-	upload_bytes?: number
-	download_bytes?: number
-	total_bytes?: number
-	remaining_bytes?: number
-	expire_at?: string
-	last_checked_at?: string
-}
-
-type SubscriptionNode = {
-	id: number
-	node_uid: string
-	name: string
-	protocol: string
-	server: string
-	port: number
-	source_order: number
-	last_latency_ms?: number
-	last_score_ms?: number
-	last_tcp_ms?: number
-	last_tls_ms?: number
-	last_e2e_domestic_ms?: number
-	last_e2e_overseas_ms?: number
-	last_jitter_ms?: number
-	last_probe_mode?: string
-	last_fail_stage?: string
-	last_fail_reason?: string
-	last_error_msg?: string
-	last_latency_checked_at?: string
-	raw_json?: string
-}
-
-type SubscriptionNodeCheck = {
-	id: number
-	target_id: number
-	node_uid: string
-	success: boolean
-	latency_ms: number
-	score_ms: number
-	tcp_ms: number
-	tls_ms: number
-	e2e_domestic_ms: number
-	e2e_overseas_ms: number
-	jitter_ms: number
-	probe_mode: string
-	fail_stage: string
-	fail_reason: string
-	error_msg: string
-	checked_at: string
-}
-
-type SubscriptionNodeSummary = {
-	node: SubscriptionNode
-	availability_24h: number
-	avg_latency_24h_ms: number
-	check_count_24h: number
-	success_count_24h: number
-	latest_latency_ms?: number
-	latest_checked_at?: string
-}
-
-type SubscriptionNodeSeriesPoint = {
-	checked_at: string
-	success: boolean
-	latency_ms: number
-	availability: number
-	error_msg: string
-}
-
-type SubscriptionSeriesPoint = {
-	bucket: string
-	available_nodes: number
-	availability: number
-	total_checks: number
-}
-
-type SubscriptionLatencyJobStatus = {
-	job_id: string
-	target_id: number
-	status: 'running' | 'done' | 'failed'
-	total: number
-	done: number
-	success: number
-	failed: number
-	started_at: string
-	finished_at?: string
-	updated_at: string
-	message?: string
-}
-
-type SubscriptionLatencyJobNode = {
-	node_uid: string
-	latency_ms?: number
-	error_msg?: string
-	checked_at: string
-}
-
-type SubscriptionLatencyJobEvent = {
-	type: string
-	job: SubscriptionLatencyJobStatus
-	node?: SubscriptionLatencyJobNode
-}
-
-type TrackingMetricMode = 'pv' | 'uv' | 'both'
-type UVIdentity = 'client_id' | 'ip_ua_hash' | 'ip_client_hash'
-type UserGroupMode = 'ip' | 'device_id' | 'ip_device'
-type PortProtocol = 'tcp' | 'udp'
-type UDPMode = 'send_only' | 'request_response'
-
-type TrackingConfig = {
-	write_key: string
-	metric_mode: TrackingMetricMode
-	uv_identity: UVIdentity
-	inactive_threshold_min: number
-	user_group_mode: UserGroupMode
-}
-
-type PortConfig = {
-	protocol: PortProtocol
-	udp_mode: UDPMode
-	udp_payload: string
-	udp_expect: string
-}
-
-type SubscriptionConfig = {
-	latency_concurrency: number
-	latency_timeout_ms: number
-	e2e_timeout_ms: number
-	fetch_timeout_ms: number
-	fetch_retries: number
-	fetch_proxy_url: string
-	fetch_user_agent: string
-	fetch_cookie: string
-	latency_probe_count: number
-	latency_interval_sec: number
-	weight_domestic: number
-	weight_overseas: number
-	probe_urls_domestic: string[]
-	probe_urls_overseas: string[]
-	singbox_path: string
-	manual_expire_at: string
-	node_uris: string[]
-}
-
-type PreferenceDefaultsPayload = {
-	scope: string
-	version: number
-	values: Record<string, unknown>
-	updated_at?: string
-}
-
-type SubscriptionCreateDefaults = {
-	latency_concurrency: number
-	latency_timeout_ms: number
-	e2e_timeout_ms: number
-	fetch_timeout_ms: number
-	fetch_retries: number
-	fetch_proxy_url: string
-	fetch_user_agent: string
-	fetch_cookie: string
-	latency_probe_count: number
-	latency_interval_sec: number
-	weight_domestic: number
-	weight_overseas: number
-	probe_urls_domestic: string[]
-	probe_urls_overseas: string[]
-	singbox_path: string
-	interval_sec: number
-	timeout_ms: number
-}
-
-type TrackingStatusInfo = {
-	label: string
-	variant: 'ok' | 'down' | 'degraded' | 'paused'
-}
-
-type UptimeBlock = {
-  label: string
-  status: 'up' | 'down' | 'unknown'
-  latency: number | null
-}
-
-type CardState = 'normal' | 'degraded' | 'down' | 'paused'
 
 const TYPE_OPTIONS = [
   { value: 'all', label: '全部' },
@@ -323,18 +72,6 @@ const TYPE_OPTIONS = [
 
 const CREATE_TYPE_OPTIONS = TYPE_OPTIONS.filter((item) => item.value !== 'all')
 
-function resolveAPIBase(): string {
-	const fromEnv = (import.meta.env.VITE_API_BASE as string | undefined)?.trim()
-	if (fromEnv) return fromEnv.replace(/\/+$/, '')
-	if (typeof window === 'undefined') return ''
-	const { hostname, port } = window.location
-	if (hostname === 'localhost' && /^51\d\d$/.test(port)) {
-		return 'http://localhost:8080'
-	}
-	return ''
-}
-
-const API_BASE = resolveAPIBase()
 const NODE_VIRTUAL_THRESHOLD = 800
 const NODE_DEFAULT_PAGE_SIZE = 100
 const SUBSCRIPTION_CREATE_SCOPE = 'subscription_create'
@@ -356,35 +93,6 @@ const SUBSCRIPTION_CREATE_DEFAULTS: SubscriptionCreateDefaults = {
 	singbox_path: 'sing-box',
 	interval_sec: 0,
 	timeout_ms: 5000,
-}
-
-async function api<T>(path: string, options?: RequestInit, token?: string): Promise<T> {
-  const headers = new Headers(options?.headers)
-  headers.set('Content-Type', 'application/json')
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers })
-  const raw = await res.text()
-  let body: ApiBody<T> | null = null
-  try {
-    body = raw ? (JSON.parse(raw) as ApiBody<T>) : null
-  } catch {
-    throw new Error(raw ? `服务返回异常响应：${raw.slice(0, 120)}` : `请求失败（HTTP ${res.status}）`)
-  }
-
-	if (!body) {
-		throw new Error(`请求失败（HTTP ${res.status}）`)
-	}
-
-	if (res.status === 401 || body.code === 40101 || body.code === 40102) {
-		localStorage.removeItem('all_monitor_token')
-		window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT))
-	}
-
-	if (!res.ok || body.code !== 0) {
-		throw new Error(body.message || `请求失败（HTTP ${res.status}）`)
-	}
-  return body.data
 }
 
 function toFiniteNumber(raw: unknown): number | null {
@@ -830,136 +538,6 @@ function openDateTimePicker(input: HTMLInputElement) {
 	pickerInput.showPicker?.()
 }
 
-async function copyTextToClipboard(text: string): Promise<boolean> {
-	try {
-		if (navigator.clipboard?.writeText) {
-			await navigator.clipboard.writeText(text)
-			return true
-		}
-	} catch {
-		// fallback below
-	}
-
-	try {
-		const textarea = document.createElement('textarea')
-		textarea.value = text
-		textarea.setAttribute('readonly', 'true')
-		textarea.style.position = 'fixed'
-		textarea.style.opacity = '0'
-		textarea.style.pointerEvents = 'none'
-		document.body.appendChild(textarea)
-		textarea.select()
-		const copied = document.execCommand('copy')
-		document.body.removeChild(textarea)
-		return copied
-	} catch {
-		return false
-	}
-}
-
-function renderToastIcon(type: ToastType) {
-	if (type === 'success') return <ShieldCheck size={16} />
-	if (type === 'error') return <X size={16} />
-	if (type === 'warning') return <AlertTriangle size={16} />
-	return <Clock3 size={16} />
-}
-
-type ConfirmDialogProps = {
-	open: boolean
-	title: string
-	description: string
-	confirmText?: string
-	cancelText?: string
-	confirmVariant?: 'primary' | 'danger'
-	confirming?: boolean
-	onConfirm: () => void
-	onCancel: () => void
-}
-
-function ConfirmDialog({
-	open,
-	title,
-	description,
-	confirmText = '确认',
-	cancelText = '取消',
-	confirmVariant = 'primary',
-	confirming = false,
-	onConfirm,
-	onCancel,
-}: ConfirmDialogProps) {
-	if (!open) return null
-	return (
-		<div className="overlay" role="dialog" aria-modal="true">
-			<div className="confirm-card panel">
-				<h3>{title}</h3>
-				<p className="muted">{description}</p>
-				<div className="confirm-actions">
-					<button type="button" onClick={onCancel} disabled={confirming}>{cancelText}</button>
-					<button type="button" className={confirmVariant === 'danger' ? 'danger-btn' : 'primary'} onClick={onConfirm} disabled={confirming}>
-						{confirming ? '处理中...' : confirmText}
-					</button>
-				</div>
-			</div>
-		</div>
-	)
-}
-
-function ToastViewport({ toasts, onClose }: { toasts: ToastMessage[]; onClose: (id: number) => void }) {
-	if (toasts.length === 0) return null
-	return (
-		<div className="toast-stack" aria-live="polite" aria-atomic="false">
-			{toasts.map((toast) => (
-				<div key={toast.id} className={`toast ${toast.type}`} role="status">
-					<span className="toast-icon" aria-hidden="true">{renderToastIcon(toast.type)}</span>
-					<p>{toast.text}</p>
-					<button type="button" className="toast-close" onClick={() => onClose(toast.id)} aria-label="关闭通知">
-						<X size={14} />
-					</button>
-				</div>
-			))}
-		</div>
-	)
-}
-
-function useToastManager() {
-	const [toasts, setToasts] = useState<ToastMessage[]>([])
-	const toastTimersRef = useRef<Record<number, number>>({})
-
-	const removeToast = useCallback((id: number) => {
-		setToasts((prev) => prev.filter((item) => item.id !== id))
-		const timer = toastTimersRef.current[id]
-		if (typeof timer === 'number') {
-			window.clearTimeout(timer)
-			delete toastTimersRef.current[id]
-		}
-	}, [])
-
-	const pushToast = useCallback((type: ToastType, text: string, durationMS = 2200) => {
-		const id = Date.now() + Math.floor(Math.random() * 100000)
-		setToasts((prev) => [{ id, type, text }, ...prev].slice(0, 5))
-		toastTimersRef.current[id] = window.setTimeout(() => {
-			setToasts((prev) => prev.filter((item) => item.id !== id))
-			delete toastTimersRef.current[id]
-		}, Math.max(1000, durationMS))
-	}, [])
-
-	useEffect(() => {
-		return () => {
-			Object.values(toastTimersRef.current).forEach((timer) => window.clearTimeout(timer))
-			toastTimersRef.current = {}
-		}
-	}, [])
-
-	const notify: ToastNotifier = useMemo(() => ({
-		success: (text, durationMS) => pushToast('success', text, durationMS),
-		error: (text, durationMS) => pushToast('error', text, durationMS),
-		info: (text, durationMS) => pushToast('info', text, durationMS),
-		warning: (text, durationMS) => pushToast('warning', text, durationMS),
-	}), [pushToast])
-
-	return { toasts, notify, removeToast }
-}
-
 function formatBytes(val?: number): string {
 	if (!val || val <= 0) return '--'
 	const units = ['B', 'KB', 'MB', 'GB', 'TB']
@@ -970,55 +548,6 @@ function formatBytes(val?: number): string {
 		i += 1
 	}
 	return `${n.toFixed(i === 0 ? 0 : 1)}${units[i]}`
-}
-
-function latencyLevel(ms?: number): 'none' | 'fast' | 'good' | 'slow' | 'bad' {
-	if (typeof ms !== 'number' || ms < 0) return 'none'
-	if (ms < 80) return 'fast'
-	if (ms < 180) return 'good'
-	if (ms < 350) return 'slow'
-	return 'bad'
-}
-
-function nodeLatencyState(node: SubscriptionNode): 'pending' | 'degraded' | 'error' | 'fast' | 'good' | 'slow' | 'bad' {
-	if (typeof node.last_latency_ms === 'number' && node.last_latency_ms >= 0) {
-		return latencyLevel(node.last_latency_ms) as 'fast' | 'good' | 'slow' | 'bad'
-	}
-	const failStage = (node.last_fail_stage || '').toLowerCase()
-	const hasFailureSignal = Boolean((node.last_error_msg || '').trim() || (node.last_fail_reason || '').trim() || failStage)
-	if (hasFailureSignal) {
-		if (typeof node.last_tcp_ms === 'number' && node.last_tcp_ms > 0 && (failStage.includes('e2e') || failStage.includes('proxy') || failStage.includes('dns'))) {
-			return 'degraded'
-		}
-		return 'error'
-	}
-	if (node.last_latency_checked_at) {
-		if (typeof node.last_tcp_ms === 'number' && node.last_tcp_ms > 0) {
-			return 'degraded'
-		}
-		return 'error'
-	}
-	return 'pending'
-}
-
-function isSubscriptionNodeAvailable(node: SubscriptionNode): boolean {
-	const state = nodeLatencyState(node)
-	return state === 'fast' || state === 'good' || state === 'slow' || state === 'bad'
-}
-
-function subscriptionNodeCopyText(node: SubscriptionNode): string {
-	if (node.raw_json) {
-		try {
-			const parsed = JSON.parse(node.raw_json) as Record<string, unknown>
-			const uri = typeof parsed.uri === 'string' ? parsed.uri.trim() : ''
-			if (uri) return uri
-		} catch {
-			// ignore invalid raw_json
-		}
-	}
-	const endpoint = node.port > 0 ? `${node.server}:${node.port}` : node.server
-	const title = node.name?.trim() || node.node_uid
-	return `${title}\n${node.protocol || '-'}://${endpoint}`
 }
 
 function generateWriteKey(): string {
@@ -1122,17 +651,6 @@ function isRouteNotFoundError(err: unknown): boolean {
 function formatMinuteTime(date: Date | null): string {
   if (!date) return '请选择时间'
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-}
-
-function useWorkspaceScrollbar() {
-  useEffect(() => {
-    document.documentElement.classList.add('dashboard-scroll')
-    document.body.classList.add('dashboard-scroll')
-    return () => {
-      document.documentElement.classList.remove('dashboard-scroll')
-      document.body.classList.remove('dashboard-scroll')
-    }
-  }, [])
 }
 
 function DashboardPage({
@@ -3976,210 +3494,6 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 	  />
     </div>
   )
-}
-
-function SubscriptionNodeDetailPage({ token, notify, theme }: { token: string; notify: ToastNotifier; theme: ThemeMode }) {
-	useWorkspaceScrollbar()
-	const navigate = useNavigate()
-	const params = useParams()
-	const id = Number(params.id)
-	const uid = decodeURIComponent(params.uid ?? '')
-	const [loading, setLoading] = useState(true)
-	const [error, setError] = useState('')
-	const [summary, setSummary] = useState<SubscriptionNodeSummary | null>(null)
-	const [series, setSeries] = useState<SubscriptionNodeSeriesPoint[]>([])
-	const [logs, setLogs] = useState<SubscriptionNodeCheck[]>([])
-	const [isNodeGroupTarget, setIsNodeGroupTarget] = useState(false)
-	const [confirmDeleteNode, setConfirmDeleteNode] = useState(false)
-	const [deletingNode, setDeletingNode] = useState(false)
-
-	async function load() {
-		if (!Number.isFinite(id) || id <= 0 || !uid) return
-		setLoading(true)
-		setError('')
-		try {
-			const [targetData, s, se, lg] = await Promise.all([
-				api<Target>(`/api/targets/${id}`, undefined, token),
-				api<SubscriptionNodeSummary>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/summary`, undefined, token),
-				api<SubscriptionNodeSeriesPoint[]>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/series?hours=24`, undefined, token),
-				api<SubscriptionNodeCheck[]>(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/logs?limit=100`, undefined, token),
-			])
-			setIsNodeGroupTarget(targetData.type === 'node_group')
-			setSummary(s)
-			setSeries(se)
-			setLogs(lg)
-		} catch (err) {
-			setError((err as Error).message)
-		} finally {
-			setLoading(false)
-		}
-	}
-
-	async function handleDeleteNode() {
-		if (!isNodeGroupTarget) return
-		setDeletingNode(true)
-		setError('')
-		try {
-			await api(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}`, { method: 'DELETE' }, token)
-			notify.success('节点已删除')
-			navigate(`/targets/${id}`)
-		} catch (err) {
-			const msg = (err as Error).message
-			setError(msg)
-			notify.error(msg || '删除节点失败')
-		} finally {
-			setDeletingNode(false)
-			setConfirmDeleteNode(false)
-		}
-	}
-
-	useEffect(() => {
-		void load()
-	}, [id, uid, token])
-
-	async function handleCheckNow() {
-		try {
-			await api(`/api/targets/${id}/subscription/nodes/${encodeURIComponent(uid)}/check-now`, { method: 'POST' }, token)
-			await load()
-		} catch (err) {
-			setError((err as Error).message)
-		}
-	}
-
-	const nodeChartColors = useMemo(() => {
-		if (theme === 'dark') {
-			return {
-				axisLabel: '#94a3b8',
-				axisLine: '#334155',
-				splitLine: 'rgba(148, 163, 184, 0.18)',
-				latencyLine: '#60a5fa',
-				availabilityLine: '#34d399',
-			}
-		}
-		return {
-			axisLabel: '#475569',
-			axisLine: '#cbd5e1',
-			splitLine: 'rgba(148, 163, 184, 0.35)',
-			latencyLine: '#2563eb',
-			availabilityLine: '#059669',
-		}
-	}, [theme])
-
-	const latencyOption = useMemo(() => ({
-		backgroundColor: 'transparent',
-		grid: { left: 26, right: 20, top: 26, bottom: 26, containLabel: true },
-		tooltip: {
-			trigger: 'axis',
-			backgroundColor: theme === 'dark' ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.94)',
-			textStyle: { color: nodeChartColors.axisLabel },
-			borderColor: nodeChartColors.axisLine,
-			borderWidth: 1,
-		},
-		xAxis: {
-			type: 'category',
-			data: series.map((x) => new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
-			axisLabel: { color: nodeChartColors.axisLabel },
-			axisLine: { lineStyle: { color: nodeChartColors.axisLine } },
-		},
-		yAxis: {
-			type: 'value',
-			axisLabel: { color: nodeChartColors.axisLabel },
-			splitLine: { lineStyle: { color: nodeChartColors.splitLine } },
-		},
-		series: [{ type: 'line', smooth: true, showSymbol: false, lineStyle: { width: 2, color: nodeChartColors.latencyLine }, data: series.map((x) => x.latency_ms) }],
-	}), [series, nodeChartColors, theme])
-
-	const availabilityOption = useMemo(() => ({
-		backgroundColor: 'transparent',
-		grid: { left: 26, right: 20, top: 26, bottom: 26, containLabel: true },
-		tooltip: {
-			trigger: 'axis',
-			backgroundColor: theme === 'dark' ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.94)',
-			textStyle: { color: nodeChartColors.axisLabel },
-			borderColor: nodeChartColors.axisLine,
-			borderWidth: 1,
-		},
-		xAxis: {
-			type: 'category',
-			data: series.map((x) => new Date(x.checked_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })),
-			axisLabel: { color: nodeChartColors.axisLabel },
-			axisLine: { lineStyle: { color: nodeChartColors.axisLine } },
-		},
-		yAxis: {
-			type: 'value', min: 0, max: 100,
-			axisLabel: { color: nodeChartColors.axisLabel },
-			splitLine: { lineStyle: { color: nodeChartColors.splitLine } },
-		},
-		series: [{ type: 'line', smooth: true, showSymbol: false, lineStyle: { width: 2, color: nodeChartColors.availabilityLine }, data: series.map((x) => x.availability) }],
-	}), [series, nodeChartColors, theme])
-
-	return (
-		<div className="workspace detail-workspace">
-			<header className="workspace-header">
-				<div className="header-main">
-					<button type="button" className="back-button" onClick={() => navigate(-1)}>
-						<ArrowLeft size={16} /> 返回
-					</button>
-					<h1 className="detail-title">节点详情</h1>
-					<p className="muted">{summary?.node?.name ?? uid}</p>
-				</div>
-				<div className="header-actions">
-					<button type="button" onClick={() => void load()}><RefreshCcw size={16} /> 刷新</button>
-					<button type="button" className="primary" onClick={() => void handleCheckNow()}><Activity size={16} /> 手动检测</button>
-					{isNodeGroupTarget ? (
-						<button type="button" className="danger-btn" onClick={() => setConfirmDeleteNode(true)}>
-							<Trash2 size={16} /> 删除节点
-						</button>
-					) : null}
-				</div>
-			</header>
-			{error ? <p className="error panel">{error}</p> : null}
-			<section className="kpi-grid">
-				<article className="panel metric-card"><p className="panel-title">24h可用率</p><p className="panel-value">{loading ? '...' : `${summary?.availability_24h?.toFixed(1) ?? '0'}%`}</p></article>
-				<article className="panel metric-card"><p className="panel-title">24h平均延迟</p><p className="panel-value">{loading ? '...' : `${Math.round(summary?.avg_latency_24h_ms ?? 0)}ms`}</p></article>
-				<article className="panel metric-card"><p className="panel-title">检查次数</p><p className="panel-value">{loading ? '...' : String(summary?.check_count_24h ?? 0)}</p></article>
-				<article className="panel metric-card"><p className="panel-title">最近延迟</p><p className="panel-value">{loading ? '...' : (typeof summary?.latest_latency_ms === 'number' ? `${summary.latest_latency_ms}ms` : '--')}</p></article>
-			</section>
-			<section className="detail-grid">
-				<article className="panel"><div className="panel-head"><h3>延迟趋势</h3></div><ReactECharts option={latencyOption} style={{ height: 220 }} /></article>
-				<article className="panel"><div className="panel-head"><h3>可用率趋势</h3></div><ReactECharts option={availabilityOption} style={{ height: 220 }} /></article>
-				<article className="panel subscription-panel-full">
-					<div className="panel-head"><h3>查询日志</h3><span>最近 100 条</span></div>
-					<div className="logs-list">
-						{logs.map((row) => (
-							<div className="log-row" key={row.id}>
-								<div className="log-row-head"><span className={`status ${row.success ? 'ok' : 'down'}`}>{row.success ? '成功' : '失败'}</span><span className="muted">{formatDateTime(row.checked_at)}</span></div>
-							<div className="log-row-body">
-								<span>业务延迟(海外E2E)：{row.success ? `${Math.max(0, row.latency_ms)}ms` : '--'}</span>
-								<span>综合评分：{row.score_ms > 0 ? `${row.score_ms}ms` : '--'}</span>
-								<span>E2E-国内：{row.e2e_domestic_ms > 0 ? `${row.e2e_domestic_ms}ms` : '--'}</span>
-								<span>E2E-海外：{row.e2e_overseas_ms > 0 ? `${row.e2e_overseas_ms}ms` : '--'}</span>
-								<span>TCP：{row.tcp_ms > 0 ? `${row.tcp_ms}ms` : '--'}</span>
-								<span>TLS：{row.tls_ms > 0 ? `${row.tls_ms}ms` : '--'}</span>
-								<span>抖动：{row.jitter_ms > 0 ? `${row.jitter_ms}ms` : '--'}</span>
-								<span>模式：{row.probe_mode || '--'}</span>
-								<span>失败阶段：{row.fail_stage || '--'}</span>
-								<span>失败原因：{row.fail_reason || '--'}</span>
-								<span>错误：{row.error_msg || '无'}</span>
-							</div>
-						  </div>
-						))}
-						{logs.length === 0 ? <p className="muted">暂无日志</p> : null}
-					</div>
-				</article>
-			</section>
-			<ConfirmDialog
-				open={confirmDeleteNode}
-				title="确认删除该节点？"
-				description="仅会从当前节点组移除该节点，删除后不可恢复。"
-				confirmText="确认删除"
-				confirmVariant="danger"
-				confirming={deletingNode}
-				onCancel={() => setConfirmDeleteNode(false)}
-				onConfirm={() => void handleDeleteNode()}
-			/>
-		</div>
-	)
 }
 
 function App() {
