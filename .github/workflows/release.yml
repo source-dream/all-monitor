@@ -36,7 +36,7 @@ jobs:
       - name: Build release artifacts
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: ./scripts/ci-release-package.sh
+        run: bash ./scripts/ci-release-package.sh
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
