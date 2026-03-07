@@ -66,7 +66,9 @@ func main() {
 	if cfg.IPRegionDB != "" {
 		resolver, geoErr := geo.NewIP2RegionResolver(cfg.IPRegionDB)
 		if geoErr != nil {
-			log.Printf("ip region resolver disabled: %v", geoErr)
+			if !errors.Is(geoErr, os.ErrNotExist) {
+				log.Printf("ip region resolver disabled: %v", geoErr)
+			}
 		} else {
 			geoResolver = resolver
 			log.Printf("ip region resolver loaded: %s", cfg.IPRegionDB)
@@ -82,6 +84,9 @@ func main() {
 	go s.Start(context.Background())
 
 	r := gin.Default()
+	if err := r.SetTrustedProxies(nil); err != nil {
+		log.Fatalf("configure trusted proxies failed: %v", err)
+	}
 	allowedOrigins, allowLAN := parseCORSAllow(cfg.CORSAllow)
 	r.Use(cors.New(cors.Config{
 		AllowOriginFunc: func(origin string) bool {

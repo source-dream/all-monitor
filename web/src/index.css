@@ -273,6 +273,33 @@ input[type='number']::-webkit-inner-spin-button {
   gap: 10px;
 }
 
+.selection-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.selection-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+}
+
+.selection-summary strong {
+  color: var(--text);
+  font-size: 0.96rem;
+}
+
+.selection-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .type-chips {
   display: flex;
   flex-wrap: wrap;
@@ -388,6 +415,12 @@ input[type='number']::-webkit-inner-spin-button {
 .monitor-card {
   display: grid;
   gap: 12px;
+}
+
+.monitor-card.selected {
+  border-color: color-mix(in srgb, var(--brand) 72%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--brand) 30%, transparent), var(--panel-shadow);
+  background: color-mix(in srgb, var(--brand-soft) 14%, var(--bg-elevated));
 }
 
 .card-head {
@@ -637,6 +670,20 @@ input[type='number']::-webkit-inner-spin-button {
 .metrics strong {
   font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
   font-size: 1rem;
+}
+
+.subscription-status-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.subscription-status-value {
+  font-size: 1rem;
+  line-height: 1.3;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .uptime-wrap {

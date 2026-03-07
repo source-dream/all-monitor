@@ -270,8 +270,24 @@ function getTrackingStatusInfo(target: Target, tracking?: TrackingSummary): Trac
 	return { label: '活跃', variant: 'ok' }
 }
 
-function getCardState(target: Target, rows: CheckResult[], tracking?: TrackingSummary): CardState {
+function isSubscriptionInvalid(summary?: SubscriptionSummary): boolean {
+	const msg = (summary?.error_msg ?? '').toLowerCase()
+	return msg.includes('empty subscription content')
+}
+
+function getSubscriptionStatusText(summary?: SubscriptionSummary): string {
+	if (!summary?.has_data) return '待检测'
+	if (isSubscriptionInvalid(summary)) return '订阅失效'
+	if (summary.reachable) return '可访问'
+	return summary.error_msg || '异常'
+}
+
+function getCardState(target: Target, rows: CheckResult[], tracking?: TrackingSummary, subscription?: SubscriptionSummary): CardState {
   if (!target.enabled) return 'paused'
+
+	if (target.type === 'subscription' && isSubscriptionInvalid(subscription)) {
+		return 'down'
+	}
 
 	if (target.type === 'tracking') {
 		const status = getTrackingStatusInfo(target, tracking)
@@ -679,6 +695,12 @@ function DashboardPage({
   const [creating, setCreating] = useState(false)
   const [checkingMap, setCheckingMap] = useState<Record<number, boolean>>({})
   const [disablingMap, setDisablingMap] = useState<Record<number, boolean>>({})
+  const [selectedTargetIds, setSelectedTargetIds] = useState<number[]>([])
+  const [selectionAnchorId, setSelectionAnchorId] = useState<number | null>(null)
+  const [bulkRefreshing, setBulkRefreshing] = useState(false)
+  const [bulkDisabling, setBulkDisabling] = useState(false)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState('all')
   const [onlyAbnormal, setOnlyAbnormal] = useState(false)
@@ -1038,6 +1060,163 @@ function DashboardPage({
     }
   }
 
+  function updateSelectionAfterModifierClick(targetId: number, useRange: boolean) {
+    if (useRange) {
+      const visibleIds = filteredTargets.map((item) => item.id)
+      const anchorId = selectionAnchorId !== null && visibleIds.includes(selectionAnchorId) ? selectionAnchorId : targetId
+      const anchorIdx = visibleIds.indexOf(anchorId)
+      const targetIdx = visibleIds.indexOf(targetId)
+      if (anchorIdx === -1 || targetIdx === -1) {
+        setSelectedTargetIds((prev) => (prev.includes(targetId) ? prev : [...prev, targetId]))
+        setSelectionAnchorId(targetId)
+        return
+      }
+      const [start, end] = anchorIdx < targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx]
+      const rangeIds = visibleIds.slice(start, end + 1)
+      setSelectedTargetIds((prev) => Array.from(new Set([...prev, ...rangeIds])))
+      setSelectionAnchorId(anchorId)
+      return
+    }
+
+    setSelectedTargetIds((prev) => {
+      if (prev.includes(targetId)) {
+        return prev.filter((id) => id !== targetId)
+      }
+      return [...prev, targetId]
+    })
+    setSelectionAnchorId(targetId)
+  }
+
+  async function handleBulkRefresh() {
+    const selectedTargets = targets.filter((target) => selectedTargetIds.includes(target.id))
+    const runnableTargets = selectedTargets.filter((target) => target.type !== 'tracking' && target.enabled)
+    const skippedCount = selectedTargets.length - runnableTargets.length
+    if (runnableTargets.length === 0) {
+      notify.warning('当前选择中没有可刷新的目标（埋点类型或已停用将被跳过）')
+      return
+    }
+
+    setBulkRefreshing(true)
+    setCheckingMap((prev) => {
+      const next = { ...prev }
+      runnableTargets.forEach((target) => {
+        next[target.id] = true
+      })
+      return next
+    })
+
+    try {
+      const results = await Promise.allSettled(
+        runnableTargets.map((target) => api(`/api/targets/${target.id}/check-now`, { method: 'POST' }, token)),
+      )
+      const failedCount = results.filter((row) => row.status === 'rejected').length
+      const successCount = runnableTargets.length - failedCount
+      if (failedCount === 0) {
+        notify.success(`批量刷新完成：成功 ${successCount}${skippedCount > 0 ? `，跳过 ${skippedCount}` : ''}`)
+      } else {
+        notify.warning(`批量刷新完成：成功 ${successCount}，失败 ${failedCount}${skippedCount > 0 ? `，跳过 ${skippedCount}` : ''}`)
+      }
+      await loadDashboard()
+      setSelectedTargetIds([])
+      setSelectionAnchorId(null)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setCheckingMap((prev) => {
+        const next = { ...prev }
+        runnableTargets.forEach((target) => {
+          next[target.id] = false
+        })
+        return next
+      })
+      setBulkRefreshing(false)
+    }
+  }
+
+  async function handleBulkDisable() {
+    const selectedTargets = targets.filter((target) => selectedTargetIds.includes(target.id))
+    const runnableTargets = selectedTargets.filter((target) => target.enabled)
+    const skippedCount = selectedTargets.length - runnableTargets.length
+    if (runnableTargets.length === 0) {
+      notify.warning('当前选择中没有可禁用的目标')
+      return
+    }
+
+    setBulkDisabling(true)
+    setDisablingMap((prev) => {
+      const next = { ...prev }
+      runnableTargets.forEach((target) => {
+        next[target.id] = true
+      })
+      return next
+    })
+
+    try {
+      const results = await Promise.allSettled(
+        runnableTargets.map((target) => api(`/api/targets/${target.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            ...target,
+            enabled: false,
+            config_json: target.config_json ?? '{}',
+          }),
+        }, token)),
+      )
+      const failedCount = results.filter((row) => row.status === 'rejected').length
+      const successCount = runnableTargets.length - failedCount
+      if (failedCount === 0) {
+        notify.success(`批量禁用完成：成功 ${successCount}${skippedCount > 0 ? `，跳过 ${skippedCount}` : ''}`)
+      } else {
+        notify.warning(`批量禁用完成：成功 ${successCount}，失败 ${failedCount}${skippedCount > 0 ? `，跳过 ${skippedCount}` : ''}`)
+      }
+      await loadDashboard()
+      setSelectedTargetIds([])
+      setSelectionAnchorId(null)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setDisablingMap((prev) => {
+        const next = { ...prev }
+        runnableTargets.forEach((target) => {
+          next[target.id] = false
+        })
+        return next
+      })
+      setBulkDisabling(false)
+    }
+  }
+
+  async function handleBulkDelete() {
+    const selectedTargets = targets.filter((target) => selectedTargetIds.includes(target.id))
+    if (selectedTargets.length === 0) return
+
+    setBulkDeleting(true)
+    try {
+      const results = await Promise.allSettled(
+        selectedTargets.map((target) => api(`/api/targets/${target.id}`, { method: 'DELETE' }, token)),
+      )
+      const failedIds: number[] = []
+      results.forEach((row, idx) => {
+        if (row.status === 'rejected') failedIds.push(selectedTargets[idx].id)
+      })
+      const failedCount = failedIds.length
+      const successCount = selectedTargets.length - failedCount
+      if (failedCount === 0) {
+        notify.success(`批量删除完成：已删除 ${successCount} 个目标`)
+      } else {
+        notify.warning(`批量删除完成：成功 ${successCount}，失败 ${failedCount}`)
+      }
+      await loadDashboard()
+      setSelectedTargetIds(failedIds)
+      setSelectionAnchorId(failedIds.length > 0 ? failedIds[failedIds.length - 1] : null)
+      setConfirmBulkDelete(false)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setBulkDeleting(false)
+    }
+  }
+
   const filteredTargets = useMemo(() => {
     return targets.filter((item) => {
       const hitKeyword = !search.trim() || `${item.name} ${item.endpoint}`.toLowerCase().includes(search.toLowerCase())
@@ -1047,13 +1226,40 @@ function DashboardPage({
 		(typeFilter === 'site' && item.type === 'http') ||
 		(typeFilter === 'ai' && item.type === 'api') ||
 		(typeFilter === 'port' && (item.type === 'tcp' || item.type === 'server' || item.type === 'node'))
-      const state = getCardState(item, resultMap[item.id] ?? [], trackingMap[item.id])
+      const state = getCardState(item, resultMap[item.id] ?? [], trackingMap[item.id], subscriptionMap[item.id])
       const hitAbnormal = !onlyAbnormal || state === 'down' || state === 'degraded'
       return hitKeyword && hitType && hitAbnormal
     })
   }, [targets, search, typeFilter, onlyAbnormal, resultMap, trackingMap])
 
+  const selectedTargetSet = useMemo(() => new Set(selectedTargetIds), [selectedTargetIds])
+  const visibleTargetIds = useMemo(() => filteredTargets.map((target) => target.id), [filteredTargets])
+  const visibleSelectedCount = useMemo(
+    () => visibleTargetIds.filter((id) => selectedTargetSet.has(id)).length,
+    [visibleTargetIds, selectedTargetSet],
+  )
+  const allVisibleSelected = visibleTargetIds.length > 0 && visibleSelectedCount === visibleTargetIds.length
+
+  function handleToggleSelectAllVisible() {
+    if (visibleTargetIds.length === 0) return
+    if (allVisibleSelected) {
+      const visibleSet = new Set(visibleTargetIds)
+      setSelectedTargetIds((prev) => prev.filter((id) => !visibleSet.has(id)))
+      setSelectionAnchorId((prev) => (prev !== null && visibleSet.has(prev) ? null : prev))
+      return
+    }
+    setSelectedTargetIds((prev) => Array.from(new Set([...prev, ...visibleTargetIds])))
+    setSelectionAnchorId((prev) => prev ?? visibleTargetIds[0])
+  }
+
+  useEffect(() => {
+    const existingIds = new Set(targets.map((target) => target.id))
+    setSelectedTargetIds((prev) => prev.filter((id) => existingIds.has(id)))
+    setSelectionAnchorId((prev) => (prev !== null && existingIds.has(prev) ? prev : null))
+  }, [targets])
+
   return (
+    <>
     <div className="workspace dashboard-workspace">
       <header className="workspace-header">
 		<div className="header-main">
@@ -1096,8 +1302,57 @@ function DashboardPage({
           >
             仅异常
           </button>
+          <button
+            type="button"
+            className={`chip ${allVisibleSelected ? 'active' : ''}`}
+            onClick={handleToggleSelectAllVisible}
+            disabled={visibleTargetIds.length === 0}
+          >
+            {allVisibleSelected ? '取消全选' : '全选'}
+          </button>
         </div>
       </section>
+
+      {selectedTargetIds.length > 0 ? (
+        <section className="panel selection-toolbar">
+          <div className="selection-summary">
+            <strong>已选 {selectedTargetIds.length} 个目标</strong>
+          </div>
+          <div className="selection-actions">
+            <button type="button" onClick={() => void handleBulkRefresh()} disabled={bulkRefreshing || bulkDisabling || bulkDeleting}>
+              {bulkRefreshing ? '批量刷新中...' : '批量刷新'}
+            </button>
+            <button type="button" onClick={() => void handleBulkDisable()} disabled={bulkRefreshing || bulkDisabling || bulkDeleting}>
+              {bulkDisabling ? '批量禁用中...' : '批量禁用'}
+            </button>
+            <button
+              type="button"
+              onClick={handleToggleSelectAllVisible}
+              disabled={visibleTargetIds.length === 0 || bulkRefreshing || bulkDisabling || bulkDeleting}
+            >
+              {allVisibleSelected ? '取消全选' : '全选'}
+            </button>
+            <button
+              type="button"
+              className="danger-btn"
+              onClick={() => setConfirmBulkDelete(true)}
+              disabled={bulkRefreshing || bulkDisabling || bulkDeleting}
+            >
+              批量删除
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedTargetIds([])
+                setSelectionAnchorId(null)
+              }}
+              disabled={bulkRefreshing || bulkDisabling || bulkDeleting}
+            >
+              清空选择
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       <section className="main-grid">
         <article className="panel create-panel">
@@ -1407,7 +1662,7 @@ function DashboardPage({
 				: latest?.checked_at
 			const nextRunInterval = getEffectiveCheckIntervalSec(target)
 			const nextRunText = target.type === 'tracking' ? '--' : formatNextRun(lastRunAt, nextRunInterval, nowTick)
-			const state = getCardState(target, rows, tracking)
+			const state = getCardState(target, rows, tracking, subscription)
             const successRows = rows.filter((x) => x.success)
             const uptime = rows.length > 0 ? (successRows.length / rows.length) * 100 : 0
             const avgLatency = successRows.length > 0
@@ -1417,9 +1672,25 @@ function DashboardPage({
 
             return (
               <article
-                className={`panel monitor-card clickable state-${state}`}
+                className={`panel monitor-card clickable state-${state}${selectedTargetSet.has(target.id) ? ' selected' : ''}`}
                 key={target.id}
-                onClick={() => navigate(`/targets/${target.id}`)}
+                onClick={(event) => {
+                  const useRange = event.shiftKey
+                  const useToggle = event.ctrlKey || event.metaKey
+                  if (useRange || useToggle) {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    updateSelectionAfterModifierClick(target.id, useRange)
+                    return
+                  }
+                  if (selectedTargetIds.length > 0) {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    updateSelectionAfterModifierClick(target.id, false)
+                    return
+                  }
+                  navigate(`/targets/${target.id}`)
+                }}
               >
 				<div className="card-head">
 				  <div className="card-head-main">
@@ -1534,7 +1805,7 @@ function DashboardPage({
 						</div>
 						<div>
 						  <p className="muted">测速状态</p>
-						  <strong>{subscription?.reachable ? '可用' : (subscription?.error_msg || '待检测')}</strong>
+						  <strong className="subscription-status-text">{getSubscriptionStatusText(subscription)}</strong>
 						</div>
 					  </>
 					)}
@@ -1585,7 +1856,7 @@ function DashboardPage({
 				) : target.type === 'tracking' ? (
 				  <p className="muted">最近事件：{tracking?.last_event_name || '-'}</p>
 				) : (
-				  <p className="muted">订阅状态：{subscription?.reachable ? '可访问' : (subscription?.error_msg || '待检测')}</p>
+					<p className="muted subscription-status-text">订阅状态：{getSubscriptionStatusText(subscription)}</p>
 				)}
 
 				<div className="card-actions">
@@ -1605,6 +1876,17 @@ function DashboardPage({
       </section>
 
     </div>
+    <ConfirmDialog
+      open={confirmBulkDelete}
+      title="确认批量删除？"
+      description={`已选择 ${selectedTargetIds.length} 个目标，删除后不可恢复，相关检测结果也会一并删除。`}
+      confirmText="确认删除"
+      confirmVariant="danger"
+      confirming={bulkDeleting}
+      onCancel={() => setConfirmBulkDelete(false)}
+      onConfirm={() => void handleBulkDelete()}
+    />
+    </>
   )
 }
 
@@ -2690,7 +2972,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
         </article>
         <article className="panel metric-card">
 		  <p className="panel-title"><AlertTriangle size={15} /> {isTrackingTarget ? '事件条数' : (isSubscriptionTarget ? (isNodeGroupTarget ? '节点组状态' : '订阅状态') : '失败次数')}</p>
-		  <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.length) : (isSubscriptionTarget ? (subscriptionSummary?.reachable ? '可访问' : (subscriptionSummary?.error_msg || '异常')) : String(failureRows.length)))}</p>
+		  <p className={`panel-value ${isSubscriptionTarget ? 'subscription-status-value' : ''}`}>{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.length) : (isSubscriptionTarget ? getSubscriptionStatusText(subscriptionSummary ?? undefined) : String(failureRows.length)))}</p>
         </article>
 		<article className="panel metric-card">
 		  <p className="panel-title"><Clock3 size={15} /> {isTrackingTarget ? '最后事件' : (isSubscriptionTarget ? (isNodeGroupTarget ? '最近测速' : '最近拉取') : '最后检测')}</p>
