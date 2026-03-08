@@ -66,7 +66,7 @@ import type { ThemeMode, ToastNotifier } from './types/ui'
 
 const DEFAULT_SUB_FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
 const APP_VERSION = ((import.meta.env.VITE_APP_VERSION as string | undefined)?.trim() || 'v0.0.0')
-const PRERELEASE_NOTICE_KEY = 'all_monitor_seen_prerelease_tag'
+const DISMISSED_UPDATE_NOTICE_KEY = 'all_monitor_dismissed_update_tag'
 
 
 const TYPE_OPTIONS = [
@@ -1426,11 +1426,12 @@ function DashboardPage({
 		try {
 			const releases = await fetchGithubReleases()
 			if (cancelled || releases.length === 0) return
-			const seenPrereleaseTag = localStorage.getItem(PRERELEASE_NOTICE_KEY) ?? ''
-			const notice = resolveVersionUpdateNotice(APP_VERSION, releases, seenPrereleaseTag)
+			const notice = resolveVersionUpdateNotice(APP_VERSION, releases)
 			if (!notice || cancelled) return
-			if (notice.kind === 'prerelease') {
-				localStorage.setItem(PRERELEASE_NOTICE_KEY, notice.latestTag)
+			const dismissedTag = localStorage.getItem(DISMISSED_UPDATE_NOTICE_KEY) ?? ''
+			if (dismissedTag === notice.latestTag) {
+				setVersionNotice(null)
+				return
 			}
 			setVersionNotice(notice)
 		} catch {
@@ -1451,14 +1452,28 @@ function DashboardPage({
             <div className="header-version-wrap">
               <span className="header-version-badge">{APP_VERSION}</span>
               {versionNotice ? (
-				<a
-				  className={`header-version-update ${versionNotice.kind === 'stable' ? 'stable' : 'prerelease'}`}
-				  href={versionNotice.url}
-				  target="_blank"
-				  rel="noreferrer"
-				>
-				  {versionNotice.kind === 'stable' ? `有正式版更新 ${versionNotice.latestTag}` : `有预发布更新 ${versionNotice.latestTag}`}
-				</a>
+				<div className="header-version-update-wrap">
+				  <a
+					className={`header-version-update ${versionNotice.kind === 'stable' ? 'stable' : 'prerelease'}`}
+					href={versionNotice.url}
+					target="_blank"
+					rel="noreferrer"
+				  >
+					{versionNotice.kind === 'stable' ? `有正式版更新 ${versionNotice.latestTag}` : `有预发布更新 ${versionNotice.latestTag}`}
+				  </a>
+				  <button
+					type="button"
+					className="header-version-dismiss"
+					onClick={() => {
+						localStorage.setItem(DISMISSED_UPDATE_NOTICE_KEY, versionNotice.latestTag)
+						setVersionNotice(null)
+					}}
+					aria-label="关闭更新提示"
+					title="关闭更新提示"
+				  >
+					<X size={12} />
+				  </button>
+				</div>
               ) : null}
             </div>
           </div>
