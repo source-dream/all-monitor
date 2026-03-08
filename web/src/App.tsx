@@ -1,17 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, FormEvent, InputHTMLAttributes } from 'react'
+import type { ChangeEvent, FormEvent, InputHTMLAttributes, MouseEvent as ReactMouseEvent } from 'react'
 import {
   Activity,
   AlertTriangle,
   ArrowLeft,
   Clock3,
   Gauge,
+  Moon,
   PauseCircle,
   Pencil,
   PlayCircle,
   Plus,
   RefreshCcw,
   ShieldCheck,
+  Sun,
   Trash2,
   X,
 } from 'lucide-react'
@@ -77,6 +79,7 @@ const CREATE_TYPE_OPTIONS = TYPE_OPTIONS.filter((item) => item.value !== 'all')
 const NODE_VIRTUAL_THRESHOLD = 800
 const NODE_DEFAULT_PAGE_SIZE = 100
 const SUBSCRIPTION_CREATE_SCOPE = 'subscription_create'
+const TARGET_DETAIL_SCROLL_KEY_PREFIX = 'target_detail_scroll:'
 const SUBSCRIPTION_CREATE_DEFAULTS: SubscriptionCreateDefaults = {
 	latency_concurrency: 20,
 	latency_timeout_ms: 1200,
@@ -207,6 +210,10 @@ function toVisitURL(endpoint: string): string {
     return val
   }
   return `https://${val}`
+}
+
+function getTargetDetailScrollKey(targetID: number): string {
+	return `${TARGET_DETAIL_SCROLL_KEY_PREFIX}${targetID}`
 }
 
 function buildUptimeBlocks(results: CheckResult[]): UptimeBlock[] {
@@ -674,13 +681,13 @@ function formatMinuteTime(date: Date | null): string {
 function DashboardPage({
   token,
   theme,
-  setTheme,
+  onToggleTheme,
   notify,
   onLogout,
 }: {
   token: string
   theme: ThemeMode
-  setTheme: (theme: ThemeMode) => void
+  onToggleTheme: (nextTheme: ThemeMode, origin: { x: number; y: number }) => void
   notify: ToastNotifier
   onLogout: () => void
 }) {
@@ -1260,20 +1267,34 @@ function DashboardPage({
 
   return (
     <>
-    <div className="workspace dashboard-workspace">
-      <header className="workspace-header">
-		<div className="header-main">
-          <p className="muted">源梦监控</p>
-          <h1>监控工作台</h1>
-        </div>
-        <div className="header-actions">
-          <button type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
-            {theme === 'dark' ? '白天模式' : '黑夜模式'}
-          </button>
-          <button type="button" onClick={() => void loadDashboard()}>刷新</button>
-          <button type="button" onClick={onLogout}>退出登录</button>
+      <header className="workspace-header dashboard-nav">
+        <div className="dashboard-nav-inner">
+			<div className="header-main">
+            <p className="dashboard-nav-brand">源梦监控</p>
+            <h1>监控工作台</h1>
+          </div>
+          <div className="header-actions">
+            <button type="button" onClick={onLogout}>退出登录</button>
+            <button
+              type="button"
+              className="mode-toggle-btn"
+              onClick={(event: ReactMouseEvent<HTMLButtonElement>) => {
+                const nextTheme: ThemeMode = theme === 'dark' ? 'light' : 'dark'
+                onToggleTheme(nextTheme, { x: event.clientX, y: event.clientY })
+              }}
+              aria-label={theme === 'dark' ? '切换到白天模式' : '切换到黑夜模式'}
+              title={theme === 'dark' ? '白天模式' : '黑夜模式'}
+            >
+              <span className={`theme-icon-stack ${theme === 'dark' ? 'show-sun' : 'show-moon'}`}>
+                <Sun size={16} className="theme-icon sun-icon" />
+                <Moon size={16} className="theme-icon moon-icon" />
+              </span>
+            </button>
+          </div>
         </div>
       </header>
+
+    <div className="workspace dashboard-workspace">
 
       {error ? <p className="error panel">{error}</p> : null}
 
@@ -1702,16 +1723,20 @@ function DashboardPage({
 						href={toVisitURL(target.endpoint)}
 						target="_blank"
 						rel="noreferrer"
-						onClick={(event) => event.stopPropagation()}
-						onContextMenu={(event) => {
+						onClick={(event) => {
 							event.preventDefault()
 							event.stopPropagation()
 							void copyTextToClipboard(target.endpoint).then((ok) => {
 								if (ok) notify.success('地址已复制')
 								else notify.error('复制失败')
 							})
+						}}
+						onContextMenu={(event) => {
+							event.preventDefault()
+							event.stopPropagation()
+							window.open(toVisitURL(target.endpoint), '_blank', 'noopener,noreferrer')
 						  }}
-						title="左键打开，右键复制地址"
+						title="左键复制地址，右键打开"
 						>
 						  {target.endpoint}
 						</a>
@@ -1860,14 +1885,17 @@ function DashboardPage({
 				)}
 
 				<div className="card-actions">
-				  <span className="muted">
-					{target.type === 'tracking'
-					  ? `最后上报：${tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '暂无'}`
-					  : ((target.type === 'subscription' || target.type === 'node_group')
-						  ? `${target.type === 'node_group' ? '最近测速' : '最近拉取'}：${subscription?.last_checked_at ? formatAgo(subscription.last_checked_at) : '暂无'}`
-						  : `最后检测：${latest ? formatAgo(latest.checked_at) : '暂无'}`)}
-				  </span>
-				  {target.type !== 'tracking' ? <span className="muted">下次检测：{nextRunText}</span> : null}
+				  <span className="card-type-badge">{getTypeLabel(target.type)}</span>
+				  <div className="card-meta-right">
+					<span className="muted">
+					  {target.type === 'tracking'
+						? `最后上报：${tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '暂无'}`
+						: ((target.type === 'subscription' || target.type === 'node_group')
+							? `${target.type === 'node_group' ? '最近测速' : '最近拉取'}：${subscription?.last_checked_at ? formatAgo(subscription.last_checked_at) : '暂无'}`
+							: `最后检测：${latest ? formatAgo(latest.checked_at) : '暂无'}`)}
+					</span>
+					{target.type !== 'tracking' ? <span className="muted">下次检测：{nextRunText}</span> : null}
+				  </div>
 				</div>
               </article>
             )
@@ -1895,6 +1923,14 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
   const navigate = useNavigate()
   const params = useParams()
   const id = Number(params.id)
+
+  function exitDetail() {
+	if (window.history.length > 1) {
+		navigate(-1)
+		return
+	}
+	navigate('/')
+  }
 
   const [target, setTarget] = useState<Target | null>(null)
   const [results, setResults] = useState<CheckResult[]>([])
@@ -2081,6 +2117,33 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
   useEffect(() => {
     void loadDetail()
   }, [id])
+
+  useEffect(() => {
+	if (!Number.isFinite(id) || id <= 0) return
+	const key = getTargetDetailScrollKey(id)
+	const raw = sessionStorage.getItem(key)
+	if (!raw) return
+	sessionStorage.removeItem(key)
+	const top = Number(raw)
+	if (!Number.isFinite(top) || top < 0) return
+	window.requestAnimationFrame(() => {
+		window.scrollTo({ top, behavior: 'auto' })
+	})
+  }, [id])
+
+  useEffect(() => {
+	const onKeyDown = (event: KeyboardEvent) => {
+		if (event.key !== 'Escape') return
+		if (confirmDelete) {
+			setConfirmDelete(false)
+			return
+		}
+		event.preventDefault()
+		exitDetail()
+	}
+	window.addEventListener('keydown', onKeyDown)
+	return () => window.removeEventListener('keydown', onKeyDown)
+  }, [confirmDelete, navigate])
 
   useEffect(() => {
 	setSubscriptionPaginationTouched(false)
@@ -2921,7 +2984,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
     <div className="workspace detail-workspace">
       <header className="workspace-header">
 		<div className="header-main">
-          <button type="button" className="back-button" onClick={() => navigate('/')}>
+          <button type="button" className="back-button" onClick={exitDetail}>
             <ArrowLeft size={16} /> 返回
           </button>
           <h1 className="detail-title">{target?.name ?? '目标详情'}</h1>
@@ -2931,7 +2994,18 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
               href={toVisitURL(target.endpoint)}
               target="_blank"
               rel="noreferrer"
-              title="打开目标地址"
+			  onClick={(event) => {
+				event.preventDefault()
+				void copyTextToClipboard(target.endpoint).then((ok) => {
+					if (ok) notify.success('地址已复制')
+					else notify.error('复制失败')
+				})
+			  }}
+			  onContextMenu={(event) => {
+				event.preventDefault()
+				window.open(toVisitURL(target.endpoint), '_blank', 'noopener,noreferrer')
+			  }}
+			  title="左键复制地址，右键打开"
             >
               {target.endpoint}
             </a>
@@ -3219,12 +3293,19 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				const pending = Boolean(refreshingNodeMap[row.node_uid])
 				const state = pending ? 'pending' : nodeLatencyState(row)
 				const isDeleteShortcut = isNodeGroupTarget
+				const availabilityRaw = typeof row.availability_24h === 'number' ? row.availability_24h : 100
+				const availabilityText = `${availabilityRaw.toFixed(1)}%`
+				const latencyText = pending
+					? '测速中'
+					: (typeof row.last_latency_ms === 'number' && row.last_latency_ms >= 0 ? `${row.last_latency_ms}ms` : '--')
 				return (
 				<article
 				  className={`subscription-node-card latency-${state}`}
 				  key={row.id}
-				  title={isDeleteShortcut ? '左键查看详情，右键复制；Alt+右键删除，Ctrl+Alt+右键直接删除' : '左键查看详情，右键复制节点'}
-				  onClick={() => navigate(`/targets/${id}/subscription/nodes/${encodeURIComponent(row.node_uid)}`)}
+				  onClick={() => {
+					sessionStorage.setItem(getTargetDetailScrollKey(id), String(window.scrollY))
+					navigate(`/targets/${id}/subscription/nodes/${encodeURIComponent(row.node_uid)}`)
+				  }}
 				  onContextMenu={(event) => {
 					event.preventDefault()
 					if (isDeleteShortcut && event.altKey) {
@@ -3243,15 +3324,8 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 					<span className="muted">{row.protocol || '-'}</span>
 				  </div>
 				  <div className="subscription-node-meta">
-					<span className={`latency-text ${state === 'error' ? 'latency-error' : state === 'pending' ? 'latency-pending' : ''}`}>
-					  {state === 'error'
-						? '测速失败'
-						: state === 'degraded'
-						? `链路降级（TCP ${row.last_tcp_ms || '--'}ms）`
-						: state === 'pending'
-						? '测速中...'
-						: `业务延迟：${row.last_latency_ms}ms`}
-					</span>
+					<span className={`latency-text ${state === 'error' ? 'latency-error' : state === 'pending' ? 'latency-pending' : ''}`}>延迟 {latencyText}</span>
+					<span className="availability-text">可用率 {availabilityText}</span>
 				  </div>
 				</article>
 			  )})}
@@ -3801,6 +3875,27 @@ function App() {
   const [error, setError] = useState('')
   const { toasts, notify, removeToast } = useToastManager()
 
+  function handleToggleTheme(nextTheme: ThemeMode, origin: { x: number; y: number }) {
+    const maxX = Math.max(origin.x, window.innerWidth - origin.x)
+    const maxY = Math.max(origin.y, window.innerHeight - origin.y)
+    const radius = Math.hypot(maxX, maxY)
+    const root = document.documentElement
+    root.style.setProperty('--theme-reveal-x', `${origin.x}px`)
+    root.style.setProperty('--theme-reveal-y', `${origin.y}px`)
+    root.style.setProperty('--theme-reveal-r', `${radius}px`)
+
+    const docWithTransition = document as Document & {
+      startViewTransition?: (callback: () => void) => { ready: Promise<void> }
+    }
+    if (typeof docWithTransition.startViewTransition === 'function') {
+      void docWithTransition.startViewTransition(() => {
+        setTheme(nextTheme)
+      }).ready.catch(() => {})
+      return
+    }
+    setTheme(nextTheme)
+  }
+
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem('all_monitor_theme', theme)
@@ -3914,7 +4009,7 @@ function App() {
             <DashboardPage
               token={token}
               theme={theme}
-              setTheme={setTheme}
+              onToggleTheme={handleToggleTheme}
               notify={notify}
               onLogout={() => {
                 localStorage.removeItem('all_monitor_token')

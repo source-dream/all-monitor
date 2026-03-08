@@ -66,6 +66,14 @@ function SubscriptionNodeDetailPage({ token, notify, theme }: { token: string; n
 	const [confirmDeleteNode, setConfirmDeleteNode] = useState(false)
 	const [deletingNode, setDeletingNode] = useState(false)
 
+	function exitDetail() {
+		if (window.history.length > 1) {
+			navigate(-1)
+			return
+		}
+		navigate(`/targets/${id}`)
+	}
+
 	async function load() {
 		if (!Number.isFinite(id) || id <= 0 || !uid) return
 		setLoading(true)
@@ -109,6 +117,20 @@ function SubscriptionNodeDetailPage({ token, notify, theme }: { token: string; n
 	useEffect(() => {
 		void load()
 	}, [id, uid, token])
+
+	useEffect(() => {
+		const onKeyDown = (event: KeyboardEvent) => {
+			if (event.key !== 'Escape') return
+			if (confirmDeleteNode) {
+				setConfirmDeleteNode(false)
+				return
+			}
+			event.preventDefault()
+			exitDetail()
+		}
+		window.addEventListener('keydown', onKeyDown)
+		return () => window.removeEventListener('keydown', onKeyDown)
+	}, [confirmDeleteNode, id, navigate])
 
 	async function handleCheckNow() {
 		try {
@@ -190,7 +212,7 @@ function SubscriptionNodeDetailPage({ token, notify, theme }: { token: string; n
 		<div className="workspace detail-workspace">
 			<header className="workspace-header">
 				<div className="header-main">
-					<button type="button" className="back-button" onClick={() => navigate(-1)}>
+					<button type="button" className="back-button" onClick={exitDetail}>
 						<ArrowLeft size={16} /> 返回
 					</button>
 					<h1 className="detail-title">节点详情</h1>

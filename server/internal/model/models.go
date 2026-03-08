@@ -108,6 +108,8 @@ type SubscriptionNode struct {
 	LastErrorMsg         string     `gorm:"type:text" json:"last_error_msg"`
 	LastLatencyCheckedAt *time.Time `json:"last_latency_checked_at"`
 	RawJSON              string     `gorm:"type:text;default:'{}'" json:"raw_json"`
+	Availability24h      *float64   `gorm:"-" json:"availability_24h,omitempty"`
+	CheckCount24h        int64      `gorm:"-" json:"check_count_24h,omitempty"`
 	UpdatedAt            time.Time  `json:"updated_at"`
 	CreatedAt            time.Time  `json:"created_at"`
 }

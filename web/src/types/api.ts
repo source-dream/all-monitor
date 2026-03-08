@@ -107,6 +107,8 @@ export type SubscriptionNode = {
 	last_fail_reason?: string
 	last_error_msg?: string
 	last_latency_checked_at?: string
+	availability_24h?: number
+	check_count_24h?: number
 	raw_json?: string
 }
 

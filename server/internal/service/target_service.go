@@ -482,6 +482,53 @@ func (s *TargetService) SubscriptionNodes(id uint, sortBy, order, search, protoc
 		return nil, err
 	}
 
+	type nodeAvailabilityStat struct {
+		Total   int64
+		Success int64
+	}
+	availabilityMap := make(map[string]nodeAvailabilityStat)
+	since := time.Now().Add(-24 * time.Hour)
+	checkRows, err := s.DB.Model(&model.SubscriptionNodeCheck{}).
+		Select("node_uid, success").
+		Where("target_id = ? AND checked_at >= ?", id, since).
+		Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer checkRows.Close()
+	for checkRows.Next() {
+		var nodeUID string
+		var success bool
+		if scanErr := checkRows.Scan(&nodeUID, &success); scanErr != nil {
+			return nil, scanErr
+		}
+		key := strings.ToLower(strings.TrimSpace(nodeUID))
+		if key == "" {
+			continue
+		}
+		stat := availabilityMap[key]
+		stat.Total += 1
+		if success {
+			stat.Success += 1
+		}
+		availabilityMap[key] = stat
+	}
+	if rowsErr := checkRows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
+	for i := range rows {
+		key := strings.ToLower(strings.TrimSpace(rows[i].NodeUID))
+		stat, ok := availabilityMap[key]
+		value := 100.0
+		if ok && stat.Total > 0 {
+			value = float64(stat.Success) / float64(stat.Total) * 100
+			rows[i].CheckCount24h = stat.Total
+		} else {
+			rows[i].CheckCount24h = 0
+		}
+		rows[i].Availability24h = &value
+	}
+
 	if strings.ToLower(order) != "desc" {
 		order = "asc"
 	}
