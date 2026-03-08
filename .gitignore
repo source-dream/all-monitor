@@ -1,6 +1,9 @@
 # AI tools
 .agents/
 .opencode/
+.agent/
+.claude/
+AGENTS.md
 
 # Node
 node_modules/
