@@ -48,6 +48,8 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          build-args: |
+            APP_VERSION=${{ github.ref_name }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

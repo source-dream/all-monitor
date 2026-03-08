@@ -30,6 +30,8 @@ import { useWorkspaceScrollbar } from './hooks/useWorkspaceScrollbar'
 import { api, API_BASE, AUTH_EXPIRED_EVENT } from './lib/api'
 import type { ApiBody } from './lib/api'
 import { copyTextToClipboard } from './lib/clipboard'
+import { fetchGithubReleases, resolveVersionUpdateNotice } from './lib/version'
+import type { VersionUpdateNotice } from './lib/version'
 import { SubscriptionNodeDetailPage } from './pages/SubscriptionNodeDetailPage'
 import type {
 	CardState,
@@ -62,6 +64,8 @@ import type {
 import type { ThemeMode, ToastNotifier } from './types/ui'
 
 const DEFAULT_SUB_FETCH_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+const APP_VERSION = ((import.meta.env.VITE_APP_VERSION as string | undefined)?.trim() || 'v0.0.0')
+const PRERELEASE_NOTICE_KEY = 'all_monitor_seen_prerelease_tag'
 
 
 const TYPE_OPTIONS = [
@@ -711,6 +715,7 @@ function DashboardPage({
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState('all')
   const [onlyAbnormal, setOnlyAbnormal] = useState(false)
+  const [versionNotice, setVersionNotice] = useState<VersionUpdateNotice | null>(null)
   const [createType, setCreateType] = useState('site')
   const [createAPIKey, setCreateAPIKey] = useState('')
   const [createSubConcurrency, setCreateSubConcurrency] = useState(SUBSCRIPTION_CREATE_DEFAULTS.latency_concurrency)
@@ -1265,13 +1270,47 @@ function DashboardPage({
     setSelectionAnchorId((prev) => (prev !== null && existingIds.has(prev) ? prev : null))
   }, [targets])
 
+  useEffect(() => {
+	let cancelled = false
+	void (async () => {
+		try {
+			const releases = await fetchGithubReleases()
+			if (cancelled || releases.length === 0) return
+			const seenPrereleaseTag = localStorage.getItem(PRERELEASE_NOTICE_KEY) ?? ''
+			const notice = resolveVersionUpdateNotice(APP_VERSION, releases, seenPrereleaseTag)
+			if (!notice || cancelled) return
+			if (notice.kind === 'prerelease') {
+				localStorage.setItem(PRERELEASE_NOTICE_KEY, notice.latestTag)
+			}
+			setVersionNotice(notice)
+		} catch {
+			if (!cancelled) setVersionNotice(null)
+		}
+	})()
+	return () => {
+		cancelled = true
+	}
+  }, [])
+
   return (
     <>
       <header className="workspace-header dashboard-nav">
         <div className="dashboard-nav-inner">
-			<div className="header-main">
-            <p className="dashboard-nav-brand">源梦监控</p>
-            <h1>监控工作台</h1>
+          <div className="header-main">
+            <h1>全能监控</h1>
+            <div className="header-version-wrap">
+              <span className="header-version-badge">{APP_VERSION}</span>
+              {versionNotice ? (
+				<a
+				  className={`header-version-update ${versionNotice.kind === 'stable' ? 'stable' : 'prerelease'}`}
+				  href={versionNotice.url}
+				  target="_blank"
+				  rel="noreferrer"
+				>
+				  {versionNotice.kind === 'stable' ? `有正式版更新 ${versionNotice.latestTag}` : `有预发布更新 ${versionNotice.latestTag}`}
+				</a>
+              ) : null}
+            </div>
           </div>
           <div className="header-actions">
             <button type="button" onClick={onLogout}>退出登录</button>
@@ -3982,7 +4021,7 @@ function App() {
     return (
       <div className="center-wrap">
         <form className="center-card form-card" onSubmit={handleLogin}>
-          <h2>登录源梦监控工作台</h2>
+          <h2>登录全能监控</h2>
           <p>私有使用环境，输入账号密码进入。</p>
           <label>
             用户名

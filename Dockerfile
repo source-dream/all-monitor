@@ -2,6 +2,9 @@ FROM node:20-bookworm-slim AS web-builder
 
 WORKDIR /src
 
+ARG APP_VERSION=v0.0.0
+ENV VITE_APP_VERSION=${APP_VERSION}
+
 COPY web/package.json web/package-lock.json ./web/
 RUN npm --prefix web ci
 
