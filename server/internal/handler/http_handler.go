@@ -6,6 +6,7 @@ import (
 	"all-monitor/server/pkg/response"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -162,6 +163,13 @@ func (h *Handler) CreateTarget(c *gin.Context) {
 	if err := h.Target.CreateTarget(&target); err != nil {
 		response.Err(c, 500, 50011, "create target failed")
 		return
+	}
+	if target.Type == "subscription" && target.Enabled {
+		go func(targetID uint) {
+			if _, err := h.Target.CheckNow(targetID); err != nil {
+				log.Printf("subscription initial pull failed (target=%d): %v", targetID, err)
+			}
+		}(target.ID)
 	}
 
 	response.OK(c, target)
@@ -826,6 +834,9 @@ type subscriptionConfigPayload struct {
 	ProbeURLsOverseas  []string `json:"probe_urls_overseas"`
 	SingBoxPath        string   `json:"singbox_path"`
 	ManualExpireAt     string   `json:"manual_expire_at"`
+	Price              float64  `json:"price"`
+	Currency           string   `json:"currency"`
+	BillingCycle       string   `json:"billing_cycle"`
 	NodeURIs           []string `json:"node_uris"`
 }
 
@@ -896,6 +907,25 @@ func normalizeSubscriptionConfig(raw string) (string, error) {
 	}
 	cfg.NodeURIs = nodeURIs
 	cfg.ManualExpireAt = strings.TrimSpace(cfg.ManualExpireAt)
+	if cfg.Price < 0 {
+		cfg.Price = 0
+	}
+	cfg.Currency = strings.ToUpper(strings.TrimSpace(cfg.Currency))
+	if cfg.Currency == "" {
+		cfg.Currency = "CNY"
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.BillingCycle)) {
+	case "weekly":
+		cfg.BillingCycle = "weekly"
+	case "monthly":
+		cfg.BillingCycle = "monthly"
+	case "quarterly":
+		cfg.BillingCycle = "quarterly"
+	case "yearly", "annual":
+		cfg.BillingCycle = "yearly"
+	default:
+		cfg.BillingCycle = "monthly"
+	}
 	if cfg.ManualExpireAt != "" {
 		layouts := []string{time.RFC3339, "2006-01-02T15:04", "2006-01-02 15:04:05"}
 		valid := false

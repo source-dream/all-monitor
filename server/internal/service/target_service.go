@@ -92,6 +92,9 @@ type subscriptionConfig struct {
 	ProbeURLsOverseas  []string `json:"probe_urls_overseas"`
 	SingBoxPath        string   `json:"singbox_path"`
 	ManualExpireAt     string   `json:"manual_expire_at"`
+	Price              float64  `json:"price"`
+	Currency           string   `json:"currency"`
+	BillingCycle       string   `json:"billing_cycle"`
 	NodeURIs           []string `json:"node_uris"`
 }
 
@@ -240,6 +243,9 @@ func (s *TargetService) CheckNow(id uint) (*model.CheckResult, error) {
 		if err := s.DB.Create(&result).Error; err != nil {
 			return nil, err
 		}
+		if snap.Reachable && snap.NodeTotal > 0 {
+			go s.MaybeAutoRefreshSubscriptionLatency(id)
+		}
 		return &result, nil
 	}
 	if target.Type == "node_group" {
@@ -387,8 +393,10 @@ func (s *TargetService) SubscriptionSummary(id uint) (map[string]any, error) {
 			return nil, err
 		}
 		var latestAt any
+		var latestLatencyAt any
 		if !latestCheckedAt.IsZero() {
 			latestAt = latestCheckedAt
+			latestLatencyAt = latestCheckedAt
 		}
 		errMsg := ""
 		reachable := availableTotal > 0
@@ -398,21 +406,22 @@ func (s *TargetService) SubscriptionSummary(id uint) (map[string]any, error) {
 			errMsg = "all nodes unreachable"
 		}
 		return map[string]any{
-			"has_data":        len(nodes) > 0,
-			"refreshing":      false,
-			"reachable":       reachable,
-			"http_status":     0,
-			"latency_ms":      int(avgLatency),
-			"error_msg":       errMsg,
-			"node_total":      len(nodes),
-			"available_total": availableTotal,
-			"protocol_stats":  protocolStats,
-			"upload_bytes":    0,
-			"download_bytes":  0,
-			"total_bytes":     0,
-			"remaining_bytes": 0,
-			"expire_at":       parseManualExpireAt(cfg.ManualExpireAt),
-			"last_checked_at": latestAt,
+			"has_data":                len(nodes) > 0,
+			"refreshing":              false,
+			"reachable":               reachable,
+			"http_status":             0,
+			"latency_ms":              int(avgLatency),
+			"error_msg":               errMsg,
+			"node_total":              len(nodes),
+			"available_total":         availableTotal,
+			"protocol_stats":          protocolStats,
+			"upload_bytes":            0,
+			"download_bytes":          0,
+			"total_bytes":             0,
+			"remaining_bytes":         0,
+			"expire_at":               parseManualExpireAt(cfg.ManualExpireAt),
+			"last_checked_at":         latestAt,
+			"last_latency_checked_at": latestLatencyAt,
 		}, nil
 	}
 
@@ -449,22 +458,35 @@ func (s *TargetService) SubscriptionSummary(id uint) (map[string]any, error) {
 		Where("target_id = ? AND last_latency_ms IS NOT NULL AND last_latency_ms >= 0", id).
 		Count(&availableTotal).Error
 
+	latestLatencyCheckedAt := time.Time{}
+	if err := s.DB.Model(&model.SubscriptionNode{}).
+		Where("target_id = ? AND last_latency_checked_at IS NOT NULL", id).
+		Select("MAX(last_latency_checked_at)").
+		Scan(&latestLatencyCheckedAt).Error; err != nil {
+		latestLatencyCheckedAt = time.Time{}
+	}
+	var latestLatencyAt any
+	if !latestLatencyCheckedAt.IsZero() {
+		latestLatencyAt = latestLatencyCheckedAt
+	}
+
 	return map[string]any{
-		"has_data":        true,
-		"refreshing":      refreshing,
-		"reachable":       latest.Reachable,
-		"http_status":     latest.HTTPStatus,
-		"latency_ms":      latest.LatencyMS,
-		"error_msg":       latest.ErrorMsg,
-		"node_total":      latest.NodeTotal,
-		"available_total": int(availableTotal),
-		"protocol_stats":  stats,
-		"upload_bytes":    latest.UploadBytes,
-		"download_bytes":  latest.DownloadBytes,
-		"total_bytes":     latest.TotalBytes,
-		"remaining_bytes": latest.RemainingBytes,
-		"expire_at":       expireAt,
-		"last_checked_at": latest.CheckedAt,
+		"has_data":                true,
+		"refreshing":              refreshing,
+		"reachable":               latest.Reachable,
+		"http_status":             latest.HTTPStatus,
+		"latency_ms":              latest.LatencyMS,
+		"error_msg":               latest.ErrorMsg,
+		"node_total":              latest.NodeTotal,
+		"available_total":         int(availableTotal),
+		"protocol_stats":          stats,
+		"upload_bytes":            latest.UploadBytes,
+		"download_bytes":          latest.DownloadBytes,
+		"total_bytes":             latest.TotalBytes,
+		"remaining_bytes":         latest.RemainingBytes,
+		"expire_at":               expireAt,
+		"last_checked_at":         latest.CheckedAt,
+		"last_latency_checked_at": latestLatencyAt,
 	}, nil
 }
 
@@ -940,14 +962,24 @@ func (s *TargetService) MaybeAutoRefreshSubscriptionLatency(id uint) {
 		return
 	}
 	interval := cfg.LatencyIntervalSec
+	var last model.SubscriptionNodeCheck
+	err = s.DB.Where("target_id = ?", id).Order("checked_at desc").First(&last).Error
 	if interval <= 0 {
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return
+		}
+		_, _ = s.RefreshSubscriptionLatency(id)
 		return
 	}
-	var last model.SubscriptionNodeCheck
-	if err := s.DB.Where("target_id = ?", id).Order("checked_at desc").First(&last).Error; err == nil {
+	if err == nil {
 		if last.CheckedAt.After(time.Now().Add(-time.Duration(interval) * time.Second)) {
 			return
 		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return
 	}
 	_, _ = s.RefreshSubscriptionLatency(id)
 }
@@ -1514,6 +1546,8 @@ func parseSubscriptionConfig(raw string) *subscriptionConfig {
 		ProbeURLsDomestic:  append([]string{}, defaultProbeURLsDomestic...),
 		ProbeURLsOverseas:  append([]string{}, defaultProbeURLsOverseas...),
 		SingBoxPath:        "sing-box",
+		Currency:           "CNY",
+		BillingCycle:       "monthly",
 	}
 	if strings.TrimSpace(raw) == "" {
 		return cfg
@@ -1562,6 +1596,25 @@ func parseSubscriptionConfig(raw string) *subscriptionConfig {
 	cfg.ProbeURLsOverseas = normalizeProbeURLs(cfg.ProbeURLsOverseas, defaultProbeURLsOverseas)
 	if strings.TrimSpace(cfg.SingBoxPath) == "" {
 		cfg.SingBoxPath = "sing-box"
+	}
+	if cfg.Price < 0 {
+		cfg.Price = 0
+	}
+	cfg.Currency = strings.ToUpper(strings.TrimSpace(cfg.Currency))
+	if cfg.Currency == "" {
+		cfg.Currency = "CNY"
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.BillingCycle)) {
+	case "weekly":
+		cfg.BillingCycle = "weekly"
+	case "monthly":
+		cfg.BillingCycle = "monthly"
+	case "quarterly":
+		cfg.BillingCycle = "quarterly"
+	case "yearly", "annual":
+		cfg.BillingCycle = "yearly"
+	default:
+		cfg.BillingCycle = "monthly"
 	}
 	nodeURIs := make([]string, 0, len(cfg.NodeURIs))
 	for _, row := range cfg.NodeURIs {

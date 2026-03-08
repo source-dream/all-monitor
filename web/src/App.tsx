@@ -4,6 +4,7 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  ChevronDown,
   Clock3,
   Gauge,
   Moon,
@@ -104,6 +105,25 @@ const SUBSCRIPTION_CREATE_DEFAULTS: SubscriptionCreateDefaults = {
 	timeout_ms: 5000,
 }
 
+const SUBSCRIPTION_CURRENCY_OPTIONS = [
+	{ value: 'CNY', label: '¥-人民币' },
+	{ value: 'USD', label: '$-美元' },
+	{ value: 'EUR', label: '€-欧元' },
+	{ value: 'GBP', label: '£-英镑' },
+	{ value: 'RUB', label: '₽-卢布' },
+	{ value: 'CHF', label: '₣-法郎' },
+	{ value: 'INR', label: '₹-卢比' },
+	{ value: 'VND', label: '₫-越南盾' },
+	{ value: 'THB', label: '฿-泰铢' },
+]
+
+const SUBSCRIPTION_BILLING_CYCLE_OPTIONS = [
+	{ value: 'weekly', label: '周' },
+	{ value: 'monthly', label: '月' },
+	{ value: 'quarterly', label: '季度' },
+	{ value: 'yearly', label: '年' },
+]
+
 function toFiniteNumber(raw: unknown): number | null {
 	if (typeof raw !== 'number' || !Number.isFinite(raw)) return null
 	return raw
@@ -186,6 +206,52 @@ function formatNextRun(lastTime?: string, intervalSec?: number, nowMs?: number):
 
 function getEffectiveCheckIntervalSec(target: Pick<Target, 'interval_sec'>): number {
 	return target.interval_sec
+}
+
+function formatSubscriptionFee(config?: SubscriptionConfig | null): string {
+	if (!config) return '免费'
+	const price = typeof config.price === 'number' && Number.isFinite(config.price) ? Math.max(0, config.price) : 0
+	if (price <= 0) return '免费'
+	const symbolMap: Record<string, string> = {
+		CNY: '¥',
+		USD: '$',
+		EUR: '€',
+		GBP: '£',
+		RUB: '₽',
+		CHF: '₣',
+		INR: '₹',
+		VND: '₫',
+		THB: '฿',
+	}
+	const cycleMap: Record<string, string> = {
+		weekly: '/周',
+		monthly: '/月',
+		quarterly: '/季度',
+		yearly: '/年',
+	}
+	const currency = (config.currency || 'CNY').toUpperCase()
+	const symbol = symbolMap[currency] ?? `${currency} `
+	const cycle = cycleMap[config.billing_cycle] ?? '/月'
+	const amount = Number.isInteger(price) ? String(price) : price.toFixed(2).replace(/\.00$/, '')
+	return `${symbol}${amount}${cycle}`
+}
+
+function isSubscriptionPaid(config?: SubscriptionConfig | null): boolean {
+	if (!config) return false
+	return typeof config.price === 'number' && Number.isFinite(config.price) && config.price > 0
+}
+
+function formatPriceInput(value: number): string {
+	if (!Number.isFinite(value) || value <= 0) return '0'
+	return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.00$/, '')
+}
+
+function parsePriceInput(raw: string): number {
+	const normalized = raw.trim()
+	if (!normalized) return 0
+	const num = Number(normalized)
+	if (!Number.isFinite(num) || num < 0) return -1
+	return num
 }
 
 function summarizeUA(ua?: string): string {
@@ -449,6 +515,9 @@ function readSubscriptionConfig(configJSON?: string): SubscriptionConfig {
 		probe_urls_overseas: ['https://www.google.com/generate_204', 'https://cp.cloudflare.com/generate_204'],
 		singbox_path: 'sing-box',
 		manual_expire_at: '',
+		price: 0,
+		currency: 'CNY',
+		billing_cycle: 'monthly',
 		node_uris: [],
 	}
 	if (!configJSON) return defaults
@@ -470,6 +539,9 @@ function readSubscriptionConfig(configJSON?: string): SubscriptionConfig {
 			probe_urls_overseas?: string[]
 			singbox_path?: string
 			manual_expire_at?: string
+			price?: number
+			currency?: string
+			billing_cycle?: string
 			node_uris?: string[]
 		}
 		const wd = typeof parsed.weight_domestic === 'number' && parsed.weight_domestic >= 0 ? parsed.weight_domestic : defaults.weight_domestic
@@ -508,6 +580,11 @@ function readSubscriptionConfig(configJSON?: string): SubscriptionConfig {
 			probe_urls_overseas: normalizeURLs(parsed.probe_urls_overseas, defaults.probe_urls_overseas),
 			singbox_path: (parsed.singbox_path ?? '').trim() || defaults.singbox_path,
 			manual_expire_at: normalizeDateTimeLocal(parsed.manual_expire_at ?? ''),
+			price: typeof parsed.price === 'number' && Number.isFinite(parsed.price) && parsed.price >= 0 ? parsed.price : defaults.price,
+			currency: (parsed.currency ?? '').toString().trim().toUpperCase() || defaults.currency,
+			billing_cycle: ['weekly', 'monthly', 'quarterly', 'yearly'].includes((parsed.billing_cycle ?? '').toString().trim().toLowerCase())
+				? (parsed.billing_cycle ?? '').toString().trim().toLowerCase()
+				: defaults.billing_cycle,
 			node_uris: Array.isArray(parsed.node_uris) ? parsed.node_uris.map((x) => String(x ?? '').trim()).filter(Boolean) : [],
 		}
 	} catch {
@@ -559,6 +636,76 @@ type NumberStepperInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'type
 function NumberStepperInput(props: NumberStepperInputProps) {
 	const { className, ...rest } = props
 	return <input type="number" className={className ? `number-stepper ${className}` : 'number-stepper'} {...rest} />
+}
+
+function FormDropdown({
+	value,
+	options,
+	onChange,
+	ariaLabel,
+}: {
+	value: string
+	options: Array<{ value: string; label: string }>
+	onChange: (next: string) => void
+	ariaLabel: string
+}) {
+	const [open, setOpen] = useState(false)
+	const ref = useRef<HTMLDivElement | null>(null)
+	const active = options.find((item) => item.value === value) ?? options[0]
+
+	useEffect(() => {
+		if (!open) return
+		const onPointerDown = (event: MouseEvent) => {
+			if (!ref.current) return
+			if (!ref.current.contains(event.target as Node)) {
+				setOpen(false)
+			}
+		}
+		const onEscape = (event: KeyboardEvent) => {
+			if (event.key === 'Escape') setOpen(false)
+		}
+		window.addEventListener('mousedown', onPointerDown)
+		window.addEventListener('keydown', onEscape)
+		return () => {
+			window.removeEventListener('mousedown', onPointerDown)
+			window.removeEventListener('keydown', onEscape)
+		}
+	}, [open])
+
+	return (
+		<div className={`form-dropdown${open ? ' open' : ''}`} ref={ref}>
+			<button
+				type="button"
+				className="form-dropdown-trigger"
+				onClick={() => setOpen((prev) => !prev)}
+				aria-haspopup="listbox"
+				aria-expanded={open}
+				aria-label={ariaLabel}
+			>
+				<span>{active?.label ?? value}</span>
+				<ChevronDown size={14} />
+			</button>
+			{open ? (
+				<div className="form-dropdown-menu" role="listbox" aria-label={ariaLabel}>
+					{options.map((item) => (
+						<button
+							key={item.value}
+							type="button"
+							className={`form-dropdown-option${item.value === value ? ' active' : ''}`}
+							onClick={() => {
+								onChange(item.value)
+								setOpen(false)
+							}}
+							role="option"
+							aria-selected={item.value === value}
+						>
+							{item.label}
+						</button>
+					))}
+				</div>
+			) : null}
+		</div>
+	)
 }
 
 function openDateTimePicker(input: HTMLInputElement) {
@@ -957,6 +1104,9 @@ function DashboardPage({
 				probe_urls_overseas: createSubURLsOverseas.split('\n').map((x) => x.trim()).filter(Boolean),
 				singbox_path: createSingBoxPath.trim() || 'sing-box',
 				manual_expire_at: createType === 'subscription' ? createSubManualExpireAt.trim() : '',
+				price: 0,
+				currency: 'CNY',
+				billing_cycle: 'monthly',
 				node_uris: createType === 'node_group' ? createNodeGroupURIs.split('\n').map((x) => x.trim()).filter(Boolean) : [],
 			})
 		: (createType === 'port'
@@ -1722,6 +1872,9 @@ function DashboardPage({
 				: latest?.checked_at
 			const nextRunInterval = getEffectiveCheckIntervalSec(target)
 			const nextRunText = target.type === 'tracking' ? '--' : formatNextRun(lastRunAt, nextRunInterval, nowTick)
+			const nextLatencyRunText = (target.type === 'subscription' || target.type === 'node_group')
+				? formatNextRun(subscription?.last_latency_checked_at, subscriptionConfig?.latency_interval_sec ?? 0, nowTick)
+				: '--'
 			const state = getCardState(target, rows, tracking, subscription)
             const successRows = rows.filter((x) => x.success)
             const uptime = rows.length > 0 ? (successRows.length / rows.length) * 100 : 0
@@ -1753,8 +1906,15 @@ function DashboardPage({
                 }}
               >
 				<div className="card-head">
-				  <div className="card-head-main">
-					<h3>{target.name}</h3>
+				<div className="card-head-main">
+					<div className="card-title-row">
+						<h3>{target.name}</h3>
+						{target.type === 'subscription' ? (
+							<span className={`subscription-fee-badge ${isSubscriptionPaid(subscriptionConfig) ? 'paid' : 'free'}`}>
+								{formatSubscriptionFee(subscriptionConfig)}
+							</span>
+						) : null}
+					</div>
 					{target.type !== 'tracking' && target.type !== 'node_group' ? (
 					  <>
 						<a
@@ -1933,7 +2093,13 @@ function DashboardPage({
 							? `${target.type === 'node_group' ? '最近测速' : '最近拉取'}：${subscription?.last_checked_at ? formatAgo(subscription.last_checked_at) : '暂无'}`
 							: `最后检测：${latest ? formatAgo(latest.checked_at) : '暂无'}`)}
 					</span>
-					{target.type !== 'tracking' ? <span className="muted">下次检测：{nextRunText}</span> : null}
+					{target.type === 'tracking' ? null : (
+						<span className="muted">
+							{(target.type === 'subscription' || target.type === 'node_group')
+								? `下次测速：${(subscriptionConfig?.latency_interval_sec ?? 0) > 0 ? nextLatencyRunText : '不定时'}`
+								: `下次检测：${nextRunText}`}
+						</span>
+					)}
 				  </div>
 				</div>
               </article>
@@ -2019,6 +2185,8 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
   const [deviceRankSearch, setDeviceRankSearch] = useState('')
   const startPickerRef = useRef<any>(null)
   const endPickerRef = useRef<any>(null)
+  const lastSavedEditFormRef = useRef('')
+  const drawerMaskPressRef = useRef(false)
 
   const pickerOptions = useMemo(() => ({
     locale: Mandarin,
@@ -2062,6 +2230,9 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 	probe_urls_overseas_text: 'https://www.google.com/generate_204\nhttps://cp.cloudflare.com/generate_204',
 	singbox_path: 'sing-box',
 	manual_expire_at: '',
+	price_input: '0',
+	currency: 'CNY',
+	billing_cycle: 'monthly',
 	node_uris_text: '',
   })
 
@@ -2076,7 +2247,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
       ])
       setTarget(targetData)
 	  const subCfg = readSubscriptionConfig(targetData.config_json)
-	  setEditForm({
+	  const nextEditForm = {
         name: targetData.name,
 		type: normalizeType(targetData.type),
         endpoint: targetData.endpoint,
@@ -2091,8 +2262,11 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		probe_urls_overseas_text: subCfg.probe_urls_overseas.join('\n'),
 		singbox_path: subCfg.singbox_path,
 		manual_expire_at: subCfg.manual_expire_at,
+		price_input: formatPriceInput(subCfg.price),
 		node_uris_text: subCfg.node_uris.join('\n'),
-	  })
+	  }
+	  setEditForm(nextEditForm)
+	  lastSavedEditFormRef.current = JSON.stringify(nextEditForm)
       setResults(rows)
 	  if (targetData.type === 'ai' || targetData.type === 'api') {
 		const financeSummary = await api<FinanceSummary>(`/api/targets/${id}/finance`, undefined, token)
@@ -2177,12 +2351,17 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 			setConfirmDelete(false)
 			return
 		}
+		if (editing) {
+			event.preventDefault()
+			setEditing(false)
+			return
+		}
 		event.preventDefault()
 		exitDetail()
 	}
 	window.addEventListener('keydown', onKeyDown)
 	return () => window.removeEventListener('keydown', onKeyDown)
-  }, [confirmDelete, navigate])
+  }, [confirmDelete, editing, navigate])
 
   useEffect(() => {
 	setSubscriptionPaginationTouched(false)
@@ -2312,8 +2491,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
     }
   }
 
-  async function handleSaveConfig(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault()
+  async function saveEditConfig() {
     if (!Number.isFinite(id) || id <= 0) return
 	if (editForm.type === 'ai' && !editForm.api_key.trim()) {
 		setError('AI中转站类型必须填写 API Key')
@@ -2351,6 +2529,11 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		setError('订阅拉取间隔不能小于 0（0 表示不定时拉取）')
 		return
 	}
+	const parsedPrice = parsePriceInput(editForm.price_input)
+	if (editForm.type === 'subscription' && parsedPrice < 0) {
+		setError('价格不能小于 0')
+		return
+	}
 	if ((editForm.type === 'subscription' || editForm.type === 'node_group') && (editForm.weight_domestic < 0 || editForm.weight_overseas < 0 || (editForm.weight_domestic + editForm.weight_overseas) <= 0)) {
 		setError('国内/海外权重需大于等于0且总和大于0')
 		return
@@ -2359,10 +2542,8 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		setError('UDP 校验回包模式下请填写期望回包')
 		return
 	}
-    setSaving(true)
-    try {
-	  const normalizedType = normalizeType(editForm.type)
-	  const payload = {
+	const normalizedType = normalizeType(editForm.type)
+	const payload = {
 		...editForm,
 		type: normalizedType,
 		endpoint: normalizedType === 'tracking' ? 'tracking://ingest' : (normalizedType === 'node_group' ? 'node-group://manual' : editForm.endpoint),
@@ -2388,8 +2569,11 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  probe_urls_overseas: editForm.probe_urls_overseas_text.split('\n').map((x) => x.trim()).filter(Boolean),
 				  singbox_path: editForm.singbox_path.trim() || 'sing-box',
 				  manual_expire_at: normalizedType === 'subscription' ? editForm.manual_expire_at.trim() : '',
+				  price: normalizedType === 'subscription' ? Math.max(0, parsedPrice) : 0,
+				  currency: normalizedType === 'subscription' ? (editForm.currency.trim().toUpperCase() || 'CNY') : 'CNY',
+				  billing_cycle: normalizedType === 'subscription' ? editForm.billing_cycle : 'monthly',
 				  node_uris: normalizedType === 'node_group' ? editForm.node_uris_text.split('\n').map((x) => x.trim()).filter(Boolean) : [],
-			  })
+				})
 			  : (normalizedType === 'port'
 			  ? JSON.stringify({
 				  protocol: editForm.protocol,
@@ -2406,19 +2590,35 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  inactive_threshold_min: editForm.inactive_threshold_min,
 			  })
 			  : '{}'))),
-	  }
+	}
+    setSaving(true)
+    try {
       await api(`/api/targets/${id}`, {
         method: 'PUT',
 		body: JSON.stringify(payload),
       }, token)
-      setEditing(false)
-      await loadDetail()
+	  lastSavedEditFormRef.current = JSON.stringify(editForm)
+	  setError('')
     } catch (err) {
       setError((err as Error).message)
     } finally {
       setSaving(false)
     }
   }
+
+  useEffect(() => {
+	if (!editing || saving) return
+	const signature = JSON.stringify(editForm)
+	if (!lastSavedEditFormRef.current) {
+		lastSavedEditFormRef.current = signature
+		return
+	}
+	if (signature === lastSavedEditFormRef.current) return
+	const timer = window.setTimeout(() => {
+		void saveEditConfig()
+	}, 700)
+	return () => window.clearTimeout(timer)
+  }, [editing, editForm, saving])
 
   async function handleDeleteTarget() {
     if (!Number.isFinite(id) || id <= 0) return
@@ -3506,9 +3706,26 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		</section>
 	  ) : null}
 
-      {editing ? (
-        <div className="drawer-mask" role="dialog" aria-modal="true">
-          <aside className="drawer panel">
+	  {editing ? (
+		<div
+		  className="drawer-mask"
+		  role="dialog"
+		  aria-modal="true"
+		  onMouseDown={(e) => {
+			drawerMaskPressRef.current = e.target === e.currentTarget
+		  }}
+		  onClick={() => {
+			if (!drawerMaskPressRef.current) return
+			setEditing(false)
+		  }}
+		>
+		  <aside
+			className="drawer panel"
+			onMouseDown={() => {
+				drawerMaskPressRef.current = false
+			}}
+			onClick={(e) => e.stopPropagation()}
+		  >
             <div className="panel-head">
               <h3>编辑监控配置</h3>
               <button type="button" className="icon-button" onClick={() => setEditing(false)}>
@@ -3516,7 +3733,12 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
               </button>
             </div>
 
-            <form className="target-form" onSubmit={handleSaveConfig}>
+            <form
+			  className="target-form"
+			  onSubmit={(e) => {
+				e.preventDefault()
+			  }}
+			>
               <label>
                 名称
                 <input
@@ -3562,145 +3784,295 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  />
 				</label>
 			  ) : null}
-			  {editForm.type === 'subscription' || editForm.type === 'node_group' ? (
+			  {editForm.type === 'subscription' ? (
 				<>
-				{editForm.type === 'node_group' ? (
+				  <details className="config-group">
+					<summary>订阅配置</summary>
+					<div className="config-group-body">
+					  <div className="form-row">
+						<label>
+						  订阅拉取间隔(秒，0=不定时)
+						  <NumberStepperInput
+							min={0}
+							value={editForm.interval_sec}
+							onChange={(e) => {
+								const next = Number(e.target.value)
+								if (!Number.isFinite(next)) return
+								setEditForm((prev) => ({ ...prev, interval_sec: Math.max(0, Math.round(next)) }))
+							}}
+							required
+						  />
+						</label>
+						<label>
+						  订阅拉取超时(ms)
+						  <NumberStepperInput
+							min={1000}
+							value={editForm.fetch_timeout_ms}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_timeout_ms: Number(e.target.value) || 20000 }))}
+							required
+						  />
+						</label>
+						<label>
+						  超时(ms)
+						  <NumberStepperInput
+							min={200}
+							value={editForm.timeout_ms}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, timeout_ms: Number(e.target.value) || 5000 }))}
+							required
+						  />
+						</label>
+						<label>
+						  拉取重试次数
+						  <NumberStepperInput
+							min={0}
+							max={5}
+							value={editForm.fetch_retries}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_retries: Math.max(0, Math.min(5, Number(e.target.value) || 0)) }))}
+							required
+						  />
+						</label>
+					  </div>
+					  <label>
+						订阅拉取代理（可选）
+						<input value={editForm.fetch_proxy_url} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_proxy_url: e.target.value }))} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />
+					  </label>
+					  <label>
+						订阅拉取 UA
+						<input value={editForm.fetch_user_agent} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_user_agent: e.target.value }))} placeholder={DEFAULT_SUB_FETCH_UA} />
+					  </label>
+					  <label>
+						订阅拉取 Cookie（可选）
+						<AutoGrowTextarea value={editForm.fetch_cookie} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_cookie: e.target.value }))} rows={2} />
+					  </label>
+					</div>
+				  </details>
+
+				  <details className="config-group">
+					<summary>节点列表配置</summary>
+					<div className="config-group-body">
+					  <div className="form-row">
+						<label>
+						  测速并发（大于等于1）
+						  <NumberStepperInput
+							min={1}
+							value={editForm.latency_concurrency}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, latency_concurrency: Number(e.target.value) || 1 }))}
+							required
+						  />
+						</label>
+						<label>
+						  测速超时(ms)
+						  <NumberStepperInput
+							min={100}
+							value={editForm.latency_timeout_ms}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, latency_timeout_ms: Number(e.target.value) || 1200 }))}
+							required
+						  />
+						</label>
+						<label>
+						  E2E超时(ms)
+						  <NumberStepperInput
+							min={500}
+							value={editForm.e2e_timeout_ms}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, e2e_timeout_ms: Number(e.target.value) || 6000 }))}
+							required
+						  />
+						</label>
+						<label>
+						  单节点探测次数
+						  <NumberStepperInput
+							min={1}
+							value={editForm.latency_probe_count}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, latency_probe_count: Number(e.target.value) || 3 }))}
+							required
+						  />
+						</label>
+						<label>
+						  自动测速间隔(秒，0=不定时)
+						  <NumberStepperInput
+							min={0}
+							value={editForm.latency_interval_sec}
+							onChange={(e) => {
+								const next = Number(e.target.value)
+								setEditForm((prev) => ({ ...prev, latency_interval_sec: Number.isFinite(next) ? Math.max(0, Math.round(next)) : 0 }))
+							}}
+							required
+						  />
+						</label>
+						<label>
+						  国内权重
+						  <NumberStepperInput
+							min={0}
+							step={0.1}
+							value={editForm.weight_domestic}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, weight_domestic: Math.max(0, Number(e.target.value) || 0) }))}
+							required
+						  />
+						</label>
+						<label>
+						  海外权重
+						  <NumberStepperInput
+							min={0}
+							step={0.1}
+							value={editForm.weight_overseas}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, weight_overseas: Math.max(0, Number(e.target.value) || 0) }))}
+							required
+						  />
+						</label>
+					  </div>
+					  <label>
+						国内测速URL（每行一个）
+						<AutoGrowTextarea value={editForm.probe_urls_domestic_text} onChange={(e) => setEditForm((prev) => ({ ...prev, probe_urls_domestic_text: e.target.value }))} rows={3} />
+					  </label>
+					  <label>
+						海外测速URL（每行一个）
+						<AutoGrowTextarea value={editForm.probe_urls_overseas_text} onChange={(e) => setEditForm((prev) => ({ ...prev, probe_urls_overseas_text: e.target.value }))} rows={3} />
+					  </label>
+					  <label>
+						sing-box 路径
+						<input value={editForm.singbox_path} onChange={(e) => setEditForm((prev) => ({ ...prev, singbox_path: e.target.value }))} placeholder="sing-box" />
+					  </label>
+					</div>
+				  </details>
+
+				  <details className="config-group">
+					<summary>价格和期限配置</summary>
+					<div className="config-group-body">
+					  <div className="form-row">
+						<label>
+						  价格
+						  <NumberStepperInput
+							min={0}
+							step={0.01}
+							value={editForm.price_input}
+							onChange={(e) => {
+								const raw = e.target.value
+								if (raw === '' || /^\d+(?:\.\d{0,2})?$/.test(raw)) {
+									setEditForm((prev) => ({ ...prev, price_input: raw }))
+								}
+							}}
+						  />
+						</label>
+						<label>
+						  货币
+						  <FormDropdown
+							value={editForm.currency}
+							options={SUBSCRIPTION_CURRENCY_OPTIONS}
+							onChange={(next) => setEditForm((prev) => ({ ...prev, currency: next.toUpperCase() }))}
+							ariaLabel="选择货币"
+						  />
+						</label>
+						<label>
+						  计费周期
+						  <FormDropdown
+							value={editForm.billing_cycle}
+							options={SUBSCRIPTION_BILLING_CYCLE_OPTIONS}
+							onChange={(next) => setEditForm((prev) => ({ ...prev, billing_cycle: next }))}
+							ariaLabel="选择计费周期"
+						  />
+						</label>
+					  </div>
+					  <label>
+						手动到期时间（可选）
+						<input
+							type="datetime-local"
+							value={editForm.manual_expire_at}
+							onChange={(e) => setEditForm((prev) => ({ ...prev, manual_expire_at: e.target.value }))}
+							onClick={(e) => openDateTimePicker(e.currentTarget)}
+							onFocus={(e) => openDateTimePicker(e.currentTarget)}
+						/>
+					  </label>
+					</div>
+				  </details>
+				</>
+			  ) : editForm.type === 'node_group' ? (
+				<>
 				  <label>
 					节点 URI 列表（每行一个，可选）
 					<AutoGrowTextarea value={editForm.node_uris_text} onChange={(e) => setEditForm((prev) => ({ ...prev, node_uris_text: e.target.value }))} rows={5} />
 				  </label>
-				) : null}
-				<div className="form-row">
-				  <label>
-					测速并发（大于等于1）
-					<NumberStepperInput
-					  min={1}
-					  value={editForm.latency_concurrency}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_concurrency: Number(e.target.value) || 1 }))}
-					  required
-					/>
-				  </label>
-				  <label>
-					测速超时(ms)
-					<NumberStepperInput
-					  min={100}
-					  value={editForm.latency_timeout_ms}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_timeout_ms: Number(e.target.value) || 1200 }))}
-					  required
-					/>
-				  </label>
-				  <label>
-					E2E超时(ms)
-					<NumberStepperInput
-					  min={500}
-					  value={editForm.e2e_timeout_ms}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, e2e_timeout_ms: Number(e.target.value) || 6000 }))}
-					  required
-					/>
-				  </label>
-				  {editForm.type === 'subscription' ? (
-					<>
-					  <label>
-						订阅拉取超时(ms)
-						<NumberStepperInput
-						  min={1000}
-						  value={editForm.fetch_timeout_ms}
-						  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_timeout_ms: Number(e.target.value) || 20000 }))}
-						  required
-						/>
-					  </label>
-					  <label>
-						拉取重试次数
-						<NumberStepperInput
-						  min={0}
-						  max={5}
-						  value={editForm.fetch_retries}
-						  onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_retries: Math.max(0, Math.min(5, Number(e.target.value) || 0)) }))}
-						  required
-						/>
-					  </label>
-					</>
-				  ) : null}
-				  <label>
-					单节点探测次数
-					<NumberStepperInput
-					  min={1}
-					  value={editForm.latency_probe_count}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, latency_probe_count: Number(e.target.value) || 3 }))}
-					  required
-					/>
-				  </label>
-				  <label>
-					自动测速间隔(秒，0=不定时)
-					<NumberStepperInput
-					  min={0}
-					  value={editForm.latency_interval_sec}
-					  onChange={(e) => {
-						const next = Number(e.target.value)
-						setEditForm((prev) => ({ ...prev, latency_interval_sec: Number.isFinite(next) ? Math.max(0, Math.round(next)) : 0 }))
-					  }}
-					  required
-					/>
-				  </label>
-				  <label>
-					国内权重
-					<NumberStepperInput
-					  min={0}
-					  step={0.1}
-					  value={editForm.weight_domestic}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, weight_domestic: Math.max(0, Number(e.target.value) || 0) }))}
-					  required
-					/>
-				  </label>
-				  <label>
-					海外权重
-					<NumberStepperInput
-					  min={0}
-					  step={0.1}
-					  value={editForm.weight_overseas}
-					  onChange={(e) => setEditForm((prev) => ({ ...prev, weight_overseas: Math.max(0, Number(e.target.value) || 0) }))}
-					  required
-					/>
-				  </label>
-				</div>
-				<label>
-				  国内测速URL（每行一个）
-				  <AutoGrowTextarea value={editForm.probe_urls_domestic_text} onChange={(e) => setEditForm((prev) => ({ ...prev, probe_urls_domestic_text: e.target.value }))} rows={3} />
-				</label>
-				<label>
-				  海外测速URL（每行一个）
-				  <AutoGrowTextarea value={editForm.probe_urls_overseas_text} onChange={(e) => setEditForm((prev) => ({ ...prev, probe_urls_overseas_text: e.target.value }))} rows={3} />
-				</label>
-				<label>
-				  sing-box 路径
-				  <input value={editForm.singbox_path} onChange={(e) => setEditForm((prev) => ({ ...prev, singbox_path: e.target.value }))} placeholder="sing-box" />
-				</label>
-				{editForm.type === 'subscription' ? (
-				  <>
+				  <div className="form-row">
 					<label>
-					  订阅拉取代理（可选）
-					  <input value={editForm.fetch_proxy_url} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_proxy_url: e.target.value }))} placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890" />
-					</label>
-					<label>
-					  订阅拉取 UA
-					  <input value={editForm.fetch_user_agent} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_user_agent: e.target.value }))} placeholder={DEFAULT_SUB_FETCH_UA} />
-					</label>
-					<label>
-					  订阅拉取 Cookie（可选）
-					  <AutoGrowTextarea value={editForm.fetch_cookie} onChange={(e) => setEditForm((prev) => ({ ...prev, fetch_cookie: e.target.value }))} rows={2} />
-					</label>
-					<label>
-					  手动到期时间（可选）
-					  <input
-						  type="datetime-local"
-						  value={editForm.manual_expire_at}
-						  onChange={(e) => setEditForm((prev) => ({ ...prev, manual_expire_at: e.target.value }))}
-						  onClick={(e) => openDateTimePicker(e.currentTarget)}
-						  onFocus={(e) => openDateTimePicker(e.currentTarget)}
+					  测速并发（大于等于1）
+					  <NumberStepperInput
+						min={1}
+						value={editForm.latency_concurrency}
+						onChange={(e) => setEditForm((prev) => ({ ...prev, latency_concurrency: Number(e.target.value) || 1 }))}
+						required
 					  />
 					</label>
-				  </>
-				) : null}
+					<label>
+					  测速超时(ms)
+					  <NumberStepperInput
+						min={100}
+						value={editForm.latency_timeout_ms}
+						onChange={(e) => setEditForm((prev) => ({ ...prev, latency_timeout_ms: Number(e.target.value) || 1200 }))}
+						required
+					  />
+					</label>
+					<label>
+					  E2E超时(ms)
+					  <NumberStepperInput
+						min={500}
+						value={editForm.e2e_timeout_ms}
+						onChange={(e) => setEditForm((prev) => ({ ...prev, e2e_timeout_ms: Number(e.target.value) || 6000 }))}
+						required
+					  />
+					</label>
+					<label>
+					  单节点探测次数
+					  <NumberStepperInput
+						min={1}
+						value={editForm.latency_probe_count}
+						onChange={(e) => setEditForm((prev) => ({ ...prev, latency_probe_count: Number(e.target.value) || 3 }))}
+						required
+					  />
+					</label>
+					<label>
+					  自动测速间隔(秒，0=不定时)
+					  <NumberStepperInput
+						min={0}
+						value={editForm.latency_interval_sec}
+						onChange={(e) => {
+							const next = Number(e.target.value)
+							setEditForm((prev) => ({ ...prev, latency_interval_sec: Number.isFinite(next) ? Math.max(0, Math.round(next)) : 0 }))
+						}}
+						required
+					  />
+					</label>
+					<label>
+					  国内权重
+					  <NumberStepperInput
+						min={0}
+						step={0.1}
+						value={editForm.weight_domestic}
+						onChange={(e) => setEditForm((prev) => ({ ...prev, weight_domestic: Math.max(0, Number(e.target.value) || 0) }))}
+						required
+					  />
+					</label>
+					<label>
+					  海外权重
+					  <NumberStepperInput
+						min={0}
+						step={0.1}
+						value={editForm.weight_overseas}
+						onChange={(e) => setEditForm((prev) => ({ ...prev, weight_overseas: Math.max(0, Number(e.target.value) || 0) }))}
+						required
+					  />
+					</label>
+				  </div>
+				  <label>
+					国内测速URL（每行一个）
+					<AutoGrowTextarea value={editForm.probe_urls_domestic_text} onChange={(e) => setEditForm((prev) => ({ ...prev, probe_urls_domestic_text: e.target.value }))} rows={3} />
+				  </label>
+				  <label>
+					海外测速URL（每行一个）
+					<AutoGrowTextarea value={editForm.probe_urls_overseas_text} onChange={(e) => setEditForm((prev) => ({ ...prev, probe_urls_overseas_text: e.target.value }))} rows={3} />
+				  </label>
+				  <label>
+					sing-box 路径
+					<input value={editForm.singbox_path} onChange={(e) => setEditForm((prev) => ({ ...prev, singbox_path: e.target.value }))} placeholder="sing-box" />
+				  </label>
 				</>
 			  ) : null}
 			  {editForm.type === 'port' ? (
@@ -3797,7 +4169,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  </label>
 				</>
 			  ) : null}
-			  {editForm.type !== 'tracking' && editForm.type !== 'node_group' ? (
+			  {editForm.type !== 'tracking' && editForm.type !== 'node_group' && editForm.type !== 'subscription' ? (
 				<div className="form-row">
 				  <label>
 					{editForm.type === 'subscription' ? '订阅拉取间隔(秒，0=不定时)' : '间隔(秒)'}
@@ -3840,10 +4212,6 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
                 <span className="switch-label">启用该监控目标</span>
               </button>
 
-              <div className="confirm-actions">
-                <button type="button" onClick={() => setEditing(false)} disabled={saving}>取消</button>
-                <button type="submit" className="primary" disabled={saving}>{saving ? '保存中...' : '保存配置'}</button>
-              </div>
             </form>
           </aside>
         </div>

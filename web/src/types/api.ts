@@ -85,6 +85,7 @@ export type SubscriptionSummary = {
 	remaining_bytes?: number
 	expire_at?: string
 	last_checked_at?: string
+	last_latency_checked_at?: string
 }
 
 export type SubscriptionNode = {
@@ -221,6 +222,9 @@ export type SubscriptionConfig = {
 	probe_urls_overseas: string[]
 	singbox_path: string
 	manual_expire_at: string
+	price: number
+	currency: string
+	billing_cycle: string
 	node_uris: string[]
 }
 

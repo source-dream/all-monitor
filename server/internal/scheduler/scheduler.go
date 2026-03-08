@@ -58,16 +58,18 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 			if target.Type == "tracking" {
 				return
 			}
-
-			if !shouldRunTargetNow(s.DB, target) {
-				return
-			}
-
 			if (target.Type == "subscription" || target.Type == "node_group") && s.Target != nil {
+				s.Target.MaybeAutoRefreshSubscriptionLatency(target.ID)
+				if !shouldRunTargetNow(s.DB, target) {
+					return
+				}
 				if _, err := s.Target.CheckNow(target.ID); err != nil {
 					log.Printf("subscription check failed: %v", err)
 				}
-				s.Target.MaybeAutoRefreshSubscriptionLatency(target.ID)
+				return
+			}
+
+			if !shouldRunTargetNow(s.DB, target) {
 				return
 			}
 
