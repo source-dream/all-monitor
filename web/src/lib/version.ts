@@ -100,7 +100,6 @@ function pickLatest(releases: ReleaseInfo[], prerelease: boolean): ReleaseInfo |
 export function resolveVersionUpdateNotice(
 	currentVersion: string,
 	releases: ReleaseInfo[],
-	seenPrereleaseTag: string,
 ): VersionUpdateNotice | null {
 	const latestStable = pickLatest(releases, false)
 	if (latestStable && compareVersions(currentVersion, latestStable.tagName) < 0) {
@@ -112,11 +111,7 @@ export function resolveVersionUpdateNotice(
 	}
 
 	const latestPrerelease = pickLatest(releases, true)
-	if (
-		latestPrerelease &&
-		compareVersions(currentVersion, latestPrerelease.tagName) < 0 &&
-		latestPrerelease.tagName !== seenPrereleaseTag
-	) {
+	if (latestPrerelease && compareVersions(currentVersion, latestPrerelease.tagName) < 0) {
 		return {
 			kind: 'prerelease',
 			latestTag: latestPrerelease.tagName,
