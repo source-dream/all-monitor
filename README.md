@@ -2,7 +2,9 @@
 
 All Monitor 是一个开源的监控系统，提供统一的界面和 API 来监控各种类型的资源，包括网站、API、TCP 服务和订阅等。
 
-## 使用指南
+## 快速开始
+
+### 二进制文件
 
 前往 [Release](https://github.com/source-dream/all-monitor/releases) 下载最新版本
 
@@ -35,6 +37,19 @@ WantedBy=multi-user.target
 
 ```
 systemctl enable --now all-monitor.service
+```
+### Docker
+
+部署
+
+```docker
+docker run -d --name all-monitor --restart unless-stopped -p 8317:8317 -e APP_PORT=8317 -e DB_DRIVER=sqlite -e SQLITE_DSN=/var/lib/all-monitor/all-monitor.db -e JWT_SECRET='请替换为强随机密钥' -e CORS_ALLOW='auto' -v all-monitor-data:/var/lib/all-monitor ghcr.io/source-dream/all-monitor:latest
+```
+
+更新
+
+```
+docker pull ghcr.io/source-dream/all-monitor:latest && docker rm -f all-monitor && docker run -d --name all-monitor --restart unless-stopped -p 8317:8317 -e APP_PORT=8317 -e DB_DRIVER=sqlite -e SQLITE_DSN=/var/lib/all-monitor/all-monitor.db -e JWT_SECRET='请替换为强随机密钥' -e CORS_ALLOW='auto' -v all-monitor-data:/var/lib/all-monitor ghcr.io/source-dream/all-monitor:latest
 ```
 
 ## 开发指南
