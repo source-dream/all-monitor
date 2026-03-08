@@ -4,7 +4,38 @@ All Monitor 是一个开源的监控系统，提供统一的界面和 API 来监
 
 ## 使用指南
 
+前往 [Release](https://github.com/source-dream/all-monitor/releases) 下载最新版本
 
+解压之后运行即可，首次运行会生成一个默认的配置文件
+
+```
+# linux运行方式
+chmod +x ./all-monitor
+./all-monitor
+```
+
+参考systemd配置文件
+
+```
+[Unit]
+Description=All Monitor Service
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+WorkingDirectory=/app/all-monitor
+ExecStart=/app/all-monitor/main
+Restart=always
+RestartSec=5
+User=<用户名>
+Group=<用户名>
+[Install]
+WantedBy=multi-user.target
+```
+
+```
+systemctl enable --now all-monitor.service
+```
 
 ## 开发指南
 
