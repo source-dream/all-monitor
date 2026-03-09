@@ -2,6 +2,7 @@ SHELL := /usr/bin/env bash
 
 GOOS_NATIVE := $(shell go env GOOS)
 GOARCH_NATIVE := $(shell go env GOARCH)
+APP_VERSION ?= $(shell (git describe --tags --always --dirty 2>/dev/null) || echo v0.0.0)
 
 .PHONY: dev dev-stop web-install web-build server-build build build-linux build-windows release run fmt test clean
 
@@ -15,7 +16,7 @@ web-install:
 	npm --prefix web install
 
 web-build:
-	npm --prefix web run build
+	VITE_APP_VERSION=$(APP_VERSION) npm --prefix web run build
 
 server-build:
 	mkdir -p bin

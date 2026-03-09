@@ -45,11 +45,11 @@ mkdir -p "$DIST_DIR"
 
 echo "[release] version: $VERSION"
 echo "[release] building linux binary..."
-make -C "$ROOT_DIR" build-linux
+make -C "$ROOT_DIR" APP_VERSION="$VERSION" build-linux
 
 echo "[release] building windows binary..."
 if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
-  make -C "$ROOT_DIR" build-windows
+  make -C "$ROOT_DIR" APP_VERSION="$VERSION" build-windows
 else
   echo "[release] mingw not found, skip windows build"
 fi
