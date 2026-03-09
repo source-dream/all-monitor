@@ -235,6 +235,20 @@ input[type='number']::-webkit-inner-spin-button {
   grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
 }
 
+.dashboard-workspace.import-drag-active {
+  outline: 2px dashed color-mix(in srgb, var(--brand) 58%, var(--border));
+  outline-offset: 4px;
+}
+
+.import-drop-hint {
+  margin: 0;
+  border: 1px dashed color-mix(in srgb, var(--brand) 58%, var(--border));
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: var(--brand);
+  background: color-mix(in srgb, var(--brand-soft) 56%, transparent);
+}
+
 .workspace-header {
   background: var(--bg-elevated);
   border: 1px solid var(--border);

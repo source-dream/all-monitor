@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, FormEvent, InputHTMLAttributes, MouseEvent as ReactMouseEvent } from 'react'
+import type { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, InputHTMLAttributes, MouseEvent as ReactMouseEvent } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -419,7 +419,25 @@ type PingLogMeta = {
 	geo: string
 }
 
+type TargetExportItem = {
+	name: string
+	type: string
+	endpoint: string
+	interval_sec: number
+	timeout_ms: number
+	enabled: boolean
+	config_json: string
+}
+
+type TargetExportFile = {
+	version: string
+	exported_at: string
+	count: number
+	items: TargetExportItem[]
+}
+
 const PING_META_PREFIX = 'ping_meta:'
+const TARGET_EXPORT_VERSION = '1.0'
 
 function parsePingLogMeta(raw?: string): PingLogMeta | null {
 	if (!raw) return null
@@ -432,6 +450,89 @@ function parsePingLogMeta(raw?: string): PingLogMeta | null {
 		return { ip, geo }
 	} catch {
 		return null
+	}
+}
+
+function normalizeConfigJSON(raw: string): string {
+	const trimmed = raw.trim()
+	if (!trimmed) return '{}'
+	try {
+		return JSON.stringify(JSON.parse(trimmed))
+	} catch {
+		return trimmed
+	}
+}
+
+function normalizeTargetTypeForImport(raw: string): string {
+	const normalized = normalizeType(raw.trim())
+	if (normalized === 'site' || normalized === 'tracking' || normalized === 'port' || normalized === 'node_group' || normalized === 'subscription' || normalized === 'ai') {
+		return normalized
+	}
+	return normalized
+}
+
+function buildTargetIdentity(item: TargetExportItem): string {
+	return JSON.stringify({
+		name: item.name,
+		type: normalizeTargetTypeForImport(item.type),
+		endpoint: item.endpoint,
+		interval_sec: item.interval_sec,
+		timeout_ms: item.timeout_ms,
+		enabled: item.enabled,
+		config_json: normalizeConfigJSON(item.config_json),
+	})
+}
+
+function toExportItem(target: Target): TargetExportItem {
+	return {
+		name: target.name,
+		type: normalizeTargetTypeForImport(target.type),
+		endpoint: target.endpoint,
+		interval_sec: target.interval_sec,
+		timeout_ms: target.timeout_ms,
+		enabled: target.enabled,
+		config_json: normalizeConfigJSON(target.config_json ?? '{}'),
+	}
+}
+
+function normalizeImportItem(raw: unknown): { payload?: CreateTargetPayload; error?: string } {
+	if (!raw || typeof raw !== 'object') return { error: '条目不是对象' }
+	const item = raw as Record<string, unknown>
+	const name = String(item.name ?? '').trim()
+	if (!name) return { error: '缺少 name' }
+	const type = normalizeTargetTypeForImport(String(item.type ?? '').trim())
+	if (!type) return { error: '缺少 type' }
+	let endpoint = String(item.endpoint ?? '').trim()
+	if (!endpoint && type === 'tracking') endpoint = 'tracking://ingest'
+	if (!endpoint && type === 'node_group') endpoint = 'node-group://manual'
+	if (!endpoint) return { error: '缺少 endpoint' }
+	const intervalRaw = Number(item.interval_sec)
+	const timeoutRaw = Number(item.timeout_ms)
+	const intervalSec = Number.isFinite(intervalRaw)
+		? Math.max(0, Math.round(intervalRaw))
+		: (type === 'tracking' ? 60 : (type === 'node_group' ? 0 : 60))
+	const timeoutMS = Number.isFinite(timeoutRaw)
+		? Math.max(200, Math.round(timeoutRaw))
+		: (type === 'tracking' || type === 'node_group' ? 5000 : 5000)
+	const enabled = typeof item.enabled === 'boolean' ? item.enabled : true
+	let configJSON = '{}'
+	if (typeof item.config_json === 'string') {
+		configJSON = normalizeConfigJSON(item.config_json)
+	} else if (item.config_json && typeof item.config_json === 'object') {
+		configJSON = JSON.stringify(item.config_json)
+	} else if (item.config && typeof item.config === 'object') {
+		configJSON = JSON.stringify(item.config)
+	}
+	return {
+		payload: {
+			name,
+			type,
+			endpoint,
+			interval_sec: intervalSec,
+			timeout_ms: timeoutMS,
+			enabled,
+			config_json: configJSON,
+		},
 	}
 }
 
@@ -879,6 +980,7 @@ function DashboardPage({
   const [bulkRefreshing, setBulkRefreshing] = useState(false)
   const [bulkDisabling, setBulkDisabling] = useState(false)
   const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [bulkImporting, setBulkImporting] = useState(false)
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState('all')
@@ -915,6 +1017,9 @@ function DashboardPage({
   const [createWriteKey, setCreateWriteKey] = useState(() => generateWriteKey())
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [subDefaultsHydrated, setSubDefaultsHydrated] = useState(false)
+  const [isImportDragActive, setIsImportDragActive] = useState(false)
+  const importInputRef = useRef<HTMLInputElement | null>(null)
+  const importDragDepthRef = useRef(0)
 
   useEffect(() => {
 	let cancelled = false
@@ -1400,6 +1505,147 @@ function DashboardPage({
     }
   }
 
+  function getCurrentTargetIdentitySet(): Set<string> {
+	return new Set(targets.map((target) => buildTargetIdentity(toExportItem(target))))
+  }
+
+  function downloadJSONFile(fileName: string, content: string) {
+	const blob = new Blob([content], { type: 'application/json;charset=utf-8' })
+	const url = URL.createObjectURL(blob)
+	const link = document.createElement('a')
+	link.href = url
+	link.download = fileName
+	document.body.appendChild(link)
+	link.click()
+	link.remove()
+	URL.revokeObjectURL(url)
+  }
+
+  async function handleBulkExport() {
+	const selectedTargets = targets.filter((target) => selectedTargetIds.includes(target.id))
+	if (selectedTargets.length === 0) {
+		notify.warning('当前没有可导出的目标')
+		return
+	}
+	const exportFile: TargetExportFile = {
+		version: TARGET_EXPORT_VERSION,
+		exported_at: new Date().toISOString(),
+		count: selectedTargets.length,
+		items: selectedTargets.map(toExportItem),
+	}
+	const timestamp = new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)
+	downloadJSONFile(`monitor-config-export-${timestamp}.json`, `${JSON.stringify(exportFile, null, 2)}\n`)
+	notify.success(`已导出 ${selectedTargets.length} 个目标配置`)
+  }
+
+  async function importTargetsFromText(raw: string) {
+	let parsed: unknown
+	try {
+		parsed = JSON.parse(raw)
+	} catch {
+		notify.error('导入失败：JSON 格式不正确')
+		return
+	}
+	const items = Array.isArray(parsed)
+		? parsed
+		: (((parsed as { items?: unknown }).items && Array.isArray((parsed as { items?: unknown }).items)) ? (parsed as { items: unknown[] }).items : null)
+	if (!items) {
+		notify.error('导入失败：未找到 items 数组')
+		return
+	}
+	if (items.length === 0) {
+		notify.warning('导入文件为空')
+		return
+	}
+
+	setBulkImporting(true)
+	try {
+		const identitySet = getCurrentTargetIdentitySet()
+		let successCount = 0
+		let skippedCount = 0
+		let failedCount = 0
+		for (const row of items) {
+			const normalized = normalizeImportItem(row)
+			if (!normalized.payload) {
+				failedCount += 1
+				continue
+			}
+			const identity = buildTargetIdentity({
+				name: normalized.payload.name,
+				type: normalized.payload.type,
+				endpoint: normalized.payload.endpoint,
+				interval_sec: normalized.payload.interval_sec,
+				timeout_ms: normalized.payload.timeout_ms,
+				enabled: normalized.payload.enabled,
+				config_json: normalized.payload.config_json,
+			})
+			if (identitySet.has(identity)) {
+				skippedCount += 1
+				continue
+			}
+			try {
+				await api('/api/targets', { method: 'POST', body: JSON.stringify(normalized.payload) }, token)
+				identitySet.add(identity)
+				successCount += 1
+			} catch {
+				failedCount += 1
+			}
+		}
+		if (successCount > 0) {
+			await loadDashboard()
+		}
+		notify.success(`导入完成：新增 ${successCount}，跳过 ${skippedCount}，失败 ${failedCount}`)
+	} finally {
+		setBulkImporting(false)
+	}
+  }
+
+  async function handleImportFile(file: File | null) {
+	if (!file) return
+	if (!file.name.toLowerCase().endsWith('.json')) {
+		notify.warning('仅支持导入 .json 文件')
+		return
+	}
+	const text = await file.text()
+	await importTargetsFromText(text)
+  }
+
+  function handleImportInputChange(event: ChangeEvent<HTMLInputElement>) {
+	const file = event.target.files?.[0] ?? null
+	void handleImportFile(file)
+	event.target.value = ''
+  }
+
+  function handleWorkspaceDragEnter(event: ReactDragEvent<HTMLDivElement>) {
+	if (!event.dataTransfer.types.includes('Files')) return
+	event.preventDefault()
+	importDragDepthRef.current += 1
+	setIsImportDragActive(true)
+  }
+
+  function handleWorkspaceDragOver(event: ReactDragEvent<HTMLDivElement>) {
+	if (!event.dataTransfer.types.includes('Files')) return
+	event.preventDefault()
+	event.dataTransfer.dropEffect = 'copy'
+  }
+
+  function handleWorkspaceDragLeave(event: ReactDragEvent<HTMLDivElement>) {
+	if (!event.dataTransfer.types.includes('Files')) return
+	event.preventDefault()
+	importDragDepthRef.current = Math.max(0, importDragDepthRef.current - 1)
+	if (importDragDepthRef.current === 0) {
+		setIsImportDragActive(false)
+	}
+  }
+
+  function handleWorkspaceDrop(event: ReactDragEvent<HTMLDivElement>) {
+	event.preventDefault()
+	importDragDepthRef.current = 0
+	setIsImportDragActive(false)
+	const file = event.dataTransfer.files?.[0] ?? null
+	void handleImportFile(file)
+  }
+
   const filteredTargets = useMemo(() => {
     return targets.filter((item) => {
       const hitKeyword = !search.trim() || `${item.name} ${item.endpoint}`.toLowerCase().includes(search.toLowerCase())
@@ -1519,7 +1765,23 @@ function DashboardPage({
         </div>
       </header>
 
-    <div className="workspace dashboard-workspace">
+    <div
+      className={`workspace dashboard-workspace${isImportDragActive ? ' import-drag-active' : ''}`}
+      onDragEnter={handleWorkspaceDragEnter}
+      onDragOver={handleWorkspaceDragOver}
+      onDragLeave={handleWorkspaceDragLeave}
+      onDrop={handleWorkspaceDrop}
+    >
+
+      <input
+        ref={importInputRef}
+        type="file"
+        accept="application/json,.json"
+        style={{ display: 'none' }}
+        onChange={handleImportInputChange}
+      />
+
+      {isImportDragActive ? <p className="import-drop-hint">松开鼠标以导入监控配置 JSON</p> : null}
 
       {error ? <p className="error panel">{error}</p> : null}
 
@@ -1556,6 +1818,14 @@ function DashboardPage({
           >
             {allVisibleSelected ? '取消全选' : '全选'}
           </button>
+          <button
+            type="button"
+            className="chip"
+            onClick={() => importInputRef.current?.click()}
+            disabled={bulkImporting}
+          >
+            {bulkImporting ? '导入中...' : '导入 JSON'}
+          </button>
         </div>
       </section>
 
@@ -1565,16 +1835,19 @@ function DashboardPage({
             <strong>已选 {selectedTargetIds.length} 个目标</strong>
           </div>
           <div className="selection-actions">
-            <button type="button" onClick={() => void handleBulkRefresh()} disabled={bulkRefreshing || bulkDisabling || bulkDeleting}>
+            <button type="button" onClick={() => void handleBulkExport()} disabled={bulkRefreshing || bulkDisabling || bulkDeleting || bulkImporting}>
+              批量导出
+            </button>
+            <button type="button" onClick={() => void handleBulkRefresh()} disabled={bulkRefreshing || bulkDisabling || bulkDeleting || bulkImporting}>
               {bulkRefreshing ? '批量刷新中...' : '批量刷新'}
             </button>
-            <button type="button" onClick={() => void handleBulkDisable()} disabled={bulkRefreshing || bulkDisabling || bulkDeleting}>
+            <button type="button" onClick={() => void handleBulkDisable()} disabled={bulkRefreshing || bulkDisabling || bulkDeleting || bulkImporting}>
               {bulkDisabling ? '批量禁用中...' : '批量禁用'}
             </button>
             <button
               type="button"
               onClick={handleToggleSelectAllVisible}
-              disabled={visibleTargetIds.length === 0 || bulkRefreshing || bulkDisabling || bulkDeleting}
+              disabled={visibleTargetIds.length === 0 || bulkRefreshing || bulkDisabling || bulkDeleting || bulkImporting}
             >
               {allVisibleSelected ? '取消全选' : '全选'}
             </button>
@@ -1582,7 +1855,7 @@ function DashboardPage({
               type="button"
               className="danger-btn"
               onClick={() => setConfirmBulkDelete(true)}
-              disabled={bulkRefreshing || bulkDisabling || bulkDeleting}
+              disabled={bulkRefreshing || bulkDisabling || bulkDeleting || bulkImporting}
             >
               批量删除
             </button>
@@ -1592,7 +1865,7 @@ function DashboardPage({
                 setSelectedTargetIds([])
                 setSelectionAnchorId(null)
               }}
-              disabled={bulkRefreshing || bulkDisabling || bulkDeleting}
+              disabled={bulkRefreshing || bulkDisabling || bulkDeleting || bulkImporting}
             >
               清空选择
             </button>
