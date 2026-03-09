@@ -35,6 +35,7 @@ export type HTTPConfig = {
 	headers: Record<string, string>
 	body: string
 	expected_status: string
+	insecure_skip_verify: boolean
 }
 
 export type FinanceSummary = {

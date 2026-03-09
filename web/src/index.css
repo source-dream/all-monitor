@@ -2029,6 +2029,27 @@ input[type='number']::-webkit-inner-spin-button {
   color: var(--text);
 }
 
+.switch-inline {
+  width: auto;
+  border: none;
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+}
+
+.switch-inline:hover,
+.switch-inline:focus-visible {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.switch-row-field {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .switch-track {
   width: 40px;
   height: 22px;

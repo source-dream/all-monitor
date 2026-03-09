@@ -574,6 +574,7 @@ function readHTTPConfig(configJSON?: string): HTTPConfig {
 		headers: {},
 		body: '',
 		expected_status: '2xx',
+		insecure_skip_verify: false,
 	}
 	if (!configJSON) return defaults
 	try {
@@ -582,6 +583,7 @@ function readHTTPConfig(configJSON?: string): HTTPConfig {
 			headers?: unknown
 			body?: unknown
 			expected_status?: unknown
+			insecure_skip_verify?: unknown
 		}
 		const method = HTTP_METHOD_OPTIONS.includes(String(parsed.method ?? '').toUpperCase() as HTTPMethod)
 			? (String(parsed.method).toUpperCase() as HTTPMethod)
@@ -594,6 +596,7 @@ function readHTTPConfig(configJSON?: string): HTTPConfig {
 			headers,
 			body: typeof parsed.body === 'string' ? parsed.body : '',
 			expected_status: typeof parsed.expected_status === 'string' && parsed.expected_status.trim() ? parsed.expected_status.trim() : '2xx',
+			insecure_skip_verify: typeof parsed.insecure_skip_verify === 'boolean' ? parsed.insecure_skip_verify : false,
 		}
 	} catch {
 		return defaults
@@ -1102,6 +1105,7 @@ function DashboardPage({
   const [createHTTPHeaders, setCreateHTTPHeaders] = useState('')
   const [createHTTPBody, setCreateHTTPBody] = useState('')
   const [createHTTPExpectedStatus, setCreateHTTPExpectedStatus] = useState('2xx')
+  const [createHTTPInsecureSkipVerify, setCreateHTTPInsecureSkipVerify] = useState(false)
   const [createPortProtocol, setCreatePortProtocol] = useState<PortProtocol>('ping')
   const [createUDPMode, setCreateUDPMode] = useState<UDPMode>('send_only')
   const [createUDPPayload, setCreateUDPPayload] = useState('ping')
@@ -1325,6 +1329,7 @@ function DashboardPage({
 			headers: siteHeaders,
 			body: createHTTPBody,
 			expected_status: createHTTPExpectedStatus.trim() || '2xx',
+			insecure_skip_verify: createHTTPInsecureSkipVerify,
 		})
 		: (createType === 'ai'
 		? JSON.stringify({ api_key: createAPIKey.trim() })
@@ -1437,6 +1442,7 @@ function DashboardPage({
 	  setCreateHTTPHeaders('')
 	  setCreateHTTPBody('')
 	  setCreateHTTPExpectedStatus('2xx')
+	  setCreateHTTPInsecureSkipVerify(false)
 	  setCreatePortProtocol('ping')
 	  setCreateUDPMode('send_only')
 	  setCreateUDPPayload('ping')
@@ -2150,6 +2156,7 @@ function DashboardPage({
 						  setCreateHTTPHeaders('')
 						  setCreateHTTPBody('')
 						  setCreateHTTPExpectedStatus('2xx')
+						  setCreateHTTPInsecureSkipVerify(false)
 					  }
 					  if (item.value === 'tracking') {
 						  setCreateWriteKey(generateWriteKey())
@@ -2187,6 +2194,21 @@ function DashboardPage({
 				<label>
 				  成功状态码规则
 				  <input value={createHTTPExpectedStatus} onChange={(e) => setCreateHTTPExpectedStatus(e.target.value)} placeholder="2xx 或 200,201" />
+				</label>
+				<label className="switch-row-field">
+				  忽略证书验证
+				  <button
+					type="button"
+					className="switch-field switch-inline"
+					role="switch"
+					aria-label="忽略证书验证"
+					aria-checked={createHTTPInsecureSkipVerify}
+					onClick={() => setCreateHTTPInsecureSkipVerify((prev) => !prev)}
+				  >
+					<span className={`switch-track ${createHTTPInsecureSkipVerify ? 'on' : 'off'}`} aria-hidden="true">
+						<span className="switch-thumb" />
+					</span>
+				  </button>
 				</label>
 				<label>
 				  请求头（JSON，可选）
@@ -3487,6 +3509,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 	http_headers_text: '',
 	http_body: '',
 	http_expected_status: '2xx',
+	http_insecure_skip_verify: false,
 	protocol: 'ping' as PortProtocol,
 	udp_mode: 'send_only' as UDPMode,
 	udp_payload: 'ping',
@@ -3537,6 +3560,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		http_headers_text: Object.keys(httpCfg.headers).length > 0 ? JSON.stringify(httpCfg.headers, null, 2) : '',
 		http_body: httpCfg.body,
 		http_expected_status: httpCfg.expected_status,
+		http_insecure_skip_verify: httpCfg.insecure_skip_verify,
 		...readTrackingConfig(targetData.config_json),
 		...readPortConfig(targetData.config_json),
 		...subCfg,
@@ -3855,6 +3879,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 			  headers: siteHeadersForSave,
 			  body: editForm.http_body,
 			  expected_status: editForm.http_expected_status.trim() || '2xx',
+			  insecure_skip_verify: editForm.http_insecure_skip_verify,
 		  })
 		  : (normalizedType === 'ai'
 		  ? JSON.stringify({ api_key: editForm.api_key.trim() })
@@ -5104,6 +5129,21 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  <label>
 					成功状态码规则
 					<input value={editForm.http_expected_status} onChange={(e) => setEditForm((prev) => ({ ...prev, http_expected_status: e.target.value }))} placeholder="2xx 或 200,201" />
+				  </label>
+				  <label className="switch-row-field">
+					忽略证书验证
+					<button
+						type="button"
+						className="switch-field switch-inline"
+						role="switch"
+						aria-label="忽略证书验证"
+						aria-checked={editForm.http_insecure_skip_verify}
+						onClick={() => setEditForm((prev) => ({ ...prev, http_insecure_skip_verify: !prev.http_insecure_skip_verify }))}
+					>
+						<span className={`switch-track ${editForm.http_insecure_skip_verify ? 'on' : 'off'}`} aria-hidden="true">
+							<span className="switch-thumb" />
+						</span>
+					</button>
 				  </label>
 				  <label>
 					请求头（JSON，可选）

@@ -4,6 +4,7 @@ import (
 	"all-monitor/server/internal/model"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,7 @@ type httpConfig struct {
 	Headers        map[string]string `json:"headers"`
 	Body           string            `json:"body"`
 	ExpectedStatus string            `json:"expected_status"`
+	InsecureSkip   bool              `json:"insecure_skip_verify"`
 }
 
 func parseHTTPConfig(raw string) httpConfig {
@@ -48,6 +50,7 @@ func parseHTTPConfig(raw string) httpConfig {
 		Headers:        map[string]string{},
 		Body:           "",
 		ExpectedStatus: "2xx",
+		InsecureSkip:   false,
 	}
 	if strings.TrimSpace(raw) == "" {
 		return cfg
@@ -120,7 +123,11 @@ func (c *HTTPChecker) Check(ctx context.Context, target model.MonitorTarget) (mo
 		req.Header.Set(k, value)
 	}
 
-	client := &http.Client{Timeout: time.Duration(target.TimeoutMS) * time.Millisecond}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if cfg.InsecureSkip && strings.HasPrefix(strings.ToLower(strings.TrimSpace(target.Endpoint)), "https://") {
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	client := &http.Client{Timeout: time.Duration(target.TimeoutMS) * time.Millisecond, Transport: transport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return model.CheckResult{
