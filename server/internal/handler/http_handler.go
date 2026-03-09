@@ -143,7 +143,7 @@ func (h *Handler) CreateTarget(c *gin.Context) {
 			return
 		}
 		if req.ConfigJSON == "{}" {
-			req.ConfigJSON = `{"protocol":"tcp"}`
+			req.ConfigJSON = `{"protocol":"ping"}`
 		}
 	} else if strings.TrimSpace(req.Endpoint) == "" {
 		response.Err(c, 400, 40001, "endpoint is required")
@@ -256,7 +256,7 @@ func (h *Handler) UpdateTarget(c *gin.Context) {
 			return
 		}
 		if input.ConfigJSON == "{}" {
-			input.ConfigJSON = `{"protocol":"tcp"}`
+			input.ConfigJSON = `{"protocol":"ping"}`
 		}
 	} else if strings.TrimSpace(input.Endpoint) == "" {
 		response.Err(c, 400, 40001, "endpoint is required")
@@ -342,7 +342,7 @@ func normalizeTargetType(raw string) string {
 		return "site"
 	case "api":
 		return "ai"
-	case "tcp", "server", "node":
+	case "tcp", "udp", "ping", "server", "node":
 		return "port"
 	case "nodegroup", "nodes", "node-group":
 		return "node_group"

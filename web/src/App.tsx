@@ -73,8 +73,8 @@ const TYPE_OPTIONS = [
   { value: 'all', label: '全部' },
   { value: 'site', label: '站点' },
   { value: 'tracking', label: '埋点' },
-  { value: 'port', label: '端口监控' },
-  { value: 'node_group', label: '节点组' },
+  { value: 'port', label: '连通' },
+  { value: 'node_group', label: '节点' },
   { value: 'subscription', label: '订阅' },
   { value: 'ai', label: 'AI中转站' },
 ]
@@ -400,8 +400,8 @@ function cardStateLabel(state: CardState): string {
 function getTypeLabel(value: string): string {
 	if (value === 'http') return '站点'
 	if (value === 'api') return 'AI中转站'
-	if (value === 'tcp' || value === 'server' || value === 'node') return '端口监控'
-	if (value === 'nodegroup' || value === 'node-group' || value === 'nodes') return '节点组'
+	if (value === 'tcp' || value === 'udp' || value === 'ping' || value === 'server' || value === 'node') return '连通'
+	if (value === 'nodegroup' || value === 'node-group' || value === 'nodes') return '节点'
 	const found = TYPE_OPTIONS.find((item) => item.value === value)
 	return found?.label ?? value
 }
@@ -409,9 +409,30 @@ function getTypeLabel(value: string): string {
 function normalizeType(value: string): string {
 	if (value === 'http') return 'site'
 	if (value === 'api') return 'ai'
-	if (value === 'tcp' || value === 'server' || value === 'node') return 'port'
+	if (value === 'tcp' || value === 'udp' || value === 'ping' || value === 'server' || value === 'node') return 'port'
 	if (value === 'nodegroup' || value === 'node-group' || value === 'nodes') return 'node_group'
 	return value
+}
+
+type PingLogMeta = {
+	ip: string
+	geo: string
+}
+
+const PING_META_PREFIX = 'ping_meta:'
+
+function parsePingLogMeta(raw?: string): PingLogMeta | null {
+	if (!raw) return null
+	if (!raw.startsWith(PING_META_PREFIX)) return null
+	try {
+		const parsed = JSON.parse(raw.slice(PING_META_PREFIX.length)) as { ip?: unknown; geo?: unknown }
+		const ip = typeof parsed.ip === 'string' ? parsed.ip.trim() : ''
+		const geo = typeof parsed.geo === 'string' ? parsed.geo.trim() : ''
+		if (!ip) return null
+		return { ip, geo }
+	} catch {
+		return null
+	}
 }
 
 function readAPIKey(configJSON?: string): string {
@@ -473,7 +494,7 @@ function readTrackingConfig(configJSON?: string): TrackingConfig {
 
 function readPortConfig(configJSON?: string): PortConfig {
 	const defaults: PortConfig = {
-		protocol: 'tcp',
+		protocol: 'ping',
 		udp_mode: 'send_only',
 		udp_payload: 'ping',
 		udp_expect: '',
@@ -487,7 +508,7 @@ function readPortConfig(configJSON?: string): PortConfig {
 			udp_expect?: string
 		}
 		return {
-			protocol: parsed.protocol === 'udp' ? 'udp' : 'tcp',
+			protocol: parsed.protocol === 'udp' || parsed.protocol === 'tcp' || parsed.protocol === 'ping' ? parsed.protocol : 'ping',
 			udp_mode: parsed.udp_mode === 'request_response' ? 'request_response' : 'send_only',
 			udp_payload: (parsed.udp_payload ?? 'ping').trim() || 'ping',
 			udp_expect: parsed.udp_expect ?? '',
@@ -884,7 +905,7 @@ function DashboardPage({
   const [createSubTargetTimeoutMS, setCreateSubTargetTimeoutMS] = useState(SUBSCRIPTION_CREATE_DEFAULTS.timeout_ms)
   const [createSubManualExpireAt, setCreateSubManualExpireAt] = useState('')
   const [createNodeGroupURIs, setCreateNodeGroupURIs] = useState('')
-  const [createPortProtocol, setCreatePortProtocol] = useState<PortProtocol>('tcp')
+  const [createPortProtocol, setCreatePortProtocol] = useState<PortProtocol>('ping')
   const [createUDPMode, setCreateUDPMode] = useState<UDPMode>('send_only')
   const [createUDPPayload, setCreateUDPPayload] = useState('ping')
   const [createUDPExpect, setCreateUDPExpect] = useState('')
@@ -1187,7 +1208,7 @@ function DashboardPage({
 	  setCreateType('site')
 	  setCreateAPIKey('')
 	  setCreateSubManualExpireAt('')
-	  setCreatePortProtocol('tcp')
+	  setCreatePortProtocol('ping')
 	  setCreateUDPMode('send_only')
 	  setCreateUDPPayload('ping')
 	  setCreateUDPExpect('')
@@ -1387,7 +1408,7 @@ function DashboardPage({
 		item.type === typeFilter ||
 		(typeFilter === 'site' && item.type === 'http') ||
 		(typeFilter === 'ai' && item.type === 'api') ||
-		(typeFilter === 'port' && (item.type === 'tcp' || item.type === 'server' || item.type === 'node'))
+		(typeFilter === 'port' && (item.type === 'tcp' || item.type === 'udp' || item.type === 'ping' || item.type === 'server' || item.type === 'node'))
       const state = getCardState(item, resultMap[item.id] ?? [], trackingMap[item.id], subscriptionMap[item.id])
       const hitAbnormal = !onlyAbnormal || state === 'down' || state === 'degraded'
       return hitKeyword && hitType && hitAbnormal
@@ -1604,7 +1625,7 @@ function DashboardPage({
 						  setCreateWriteKey(generateWriteKey())
 					  }
 					  if (item.value === 'port') {
-						  setCreatePortProtocol('tcp')
+						  setCreatePortProtocol('ping')
 						  setCreateUDPMode('send_only')
 						  setCreateUDPPayload('ping')
 						  setCreateUDPExpect('')
@@ -1628,6 +1649,7 @@ function DashboardPage({
 				<label>
 				  协议
 				  <div className="type-chips">
+					<button type="button" className={`chip ${createPortProtocol === 'ping' ? 'active' : ''}`} onClick={() => setCreatePortProtocol('ping')}>PING</button>
 					<button type="button" className={`chip ${createPortProtocol === 'tcp' ? 'active' : ''}`} onClick={() => setCreatePortProtocol('tcp')}>TCP</button>
 					<button type="button" className={`chip ${createPortProtocol === 'udp' ? 'active' : ''}`} onClick={() => setCreatePortProtocol('udp')}>UDP</button>
 				  </div>
@@ -2225,7 +2247,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 	uv_identity: 'client_id' as UVIdentity,
 	user_group_mode: 'ip_device' as UserGroupMode,
 	inactive_threshold_min: 0,
-	protocol: 'tcp' as PortProtocol,
+	protocol: 'ping' as PortProtocol,
 	udp_mode: 'send_only' as UDPMode,
 	udp_payload: 'ping',
 	udp_expect: '',
@@ -2716,6 +2738,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
   const isTrackingTarget = target?.type === 'tracking'
   const isSubscriptionTarget = target?.type === 'subscription' || target?.type === 'node_group'
   const trackingConfig = useMemo(() => readTrackingConfig(target?.config_json), [target?.config_json])
+  const portConfig = useMemo(() => readPortConfig(target?.config_json), [target?.config_json])
   const subscriptionConfig = useMemo(() => readSubscriptionConfig(target?.config_json), [target?.config_json])
   const detailLastRunAt = isTrackingTarget
 	? trackingSummary?.last_event_at
@@ -2757,6 +2780,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 	}, 0)
   }, [subscriptionNodes])
   const isNodeGroupTarget = target?.type === 'node_group'
+  const isPingTarget = target?.type === 'port' && portConfig.protocol === 'ping'
   const nodeGroupSeriesChart = useMemo(() => {
 	const times = subscriptionSeries.map((item) => new Date(item.bucket).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
 	return {
@@ -3032,11 +3056,15 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		if (isNodeGroupTarget) {
 			return `${first.axisValueLabel}<br/>可用节点数: ${first.data ?? 0}`
 		}
-        const row = chartSeries.rows[first.dataIndex]
-        if (!row) return first.axisValueLabel
-        const status = row.success ? '在线' : '异常'
+		const row = chartSeries.rows[first.dataIndex]
+		if (!row) return first.axisValueLabel
+		const status = row.success ? '在线' : '异常'
 		const latency = row.success ? `${Math.max(0, row.latency_ms)}ms` : '--'
-		return `${formatDateTime(row.checked_at)}<br/>状态: ${status}<br/>延迟: ${latency}<br/>错误: ${row.error_msg || '无'}`
+		const pingMeta = isPingTarget ? parsePingLogMeta(row.error_msg) : null
+		const ipInfo = pingMeta ? `<br/>IP: ${pingMeta.ip}` : ''
+		const geoInfo = pingMeta ? `<br/>归属地: ${pingMeta.geo || '未知'}` : ''
+		const errorText = pingMeta ? '无' : (row.error_msg || '无')
+		return `${formatDateTime(row.checked_at)}<br/>状态: ${status}<br/>延迟: ${latency}${ipInfo}${geoInfo}<br/>错误: ${errorText}`
 	  },
     },
     grid: { left: 40, right: 16, top: 20, bottom: 28 },
@@ -3065,7 +3093,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
         areaStyle: { color: 'rgba(59,130,246,0.15)' },
       },
     ],
-	}), [chartSeries, isTrackingTarget, isNodeGroupTarget, nodeGroupSeriesChart, trackingChart])
+	}), [chartSeries, isPingTarget, isTrackingTarget, isNodeGroupTarget, nodeGroupSeriesChart, trackingChart])
 
   const availabilityOption = useMemo(() => ({
     tooltip: {
@@ -3299,7 +3327,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		  <p className="panel-value">{loading ? '...' : (isTrackingTarget ? String(new Set(windowedTrackingEvents.map((item) => item.uv_key).filter(Boolean)).size) : (isSubscriptionTarget ? (isNodeGroupTarget ? `${availableSubscriptionCount}` : formatBytes(subscriptionSummary?.remaining_bytes)) : (avgLatency > 0 ? `${avgLatency}ms` : '--')))}</p>
         </article>
         <article className="panel metric-card">
-		  <p className="panel-title"><AlertTriangle size={15} /> {isTrackingTarget ? '事件条数' : (isSubscriptionTarget ? (isNodeGroupTarget ? '节点组状态' : '订阅状态') : '失败次数')}</p>
+		  <p className="panel-title"><AlertTriangle size={15} /> {isTrackingTarget ? '事件条数' : (isSubscriptionTarget ? (isNodeGroupTarget ? '节点状态' : '订阅状态') : '失败次数')}</p>
 		  <p className={`panel-value ${isSubscriptionTarget ? 'subscription-status-value' : ''}`}>{loading ? '...' : (isTrackingTarget ? String(windowedTrackingEvents.length) : (isSubscriptionTarget ? getSubscriptionStatusText(subscriptionSummary ?? undefined) : String(failureRows.length)))}</p>
         </article>
 		<article className="panel metric-card">
@@ -3468,7 +3496,10 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  </div>
 				</div>
 			  ))
-			: (logsToShow as CheckResult[]).map((row) => (
+			: (logsToShow as CheckResult[]).map((row) => {
+				const pingMeta = isPingTarget ? parsePingLogMeta(row.error_msg) : null
+				const errorText = pingMeta ? '无' : (row.error_msg || '无')
+				return (
 				<div className="log-row" key={row.id}>
 				  <div className="log-row-head">
 					<span className={`status ${row.success ? 'ok' : 'down'}`}>{row.success ? '在线' : '异常'}</span>
@@ -3476,10 +3507,13 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  </div>
 				  <div className="log-row-body">
 					<span>延迟：{row.success ? `${Math.max(0, row.latency_ms)}ms` : '--'}</span>
-					<span>错误：{row.error_msg || '无'}</span>
+					{pingMeta ? <span>IP：{pingMeta.ip}</span> : null}
+					{pingMeta ? <span>归属地：{pingMeta.geo || '未知'}</span> : null}
+					<span>错误：{errorText}</span>
 				  </div>
 				</div>
-			  ))}
+				)
+			  })}
             {logsToShow.length === 0 ? <p className="muted">暂无日志</p> : null}
           </div>
         </article>
@@ -4095,10 +4129,11 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  <label>
 					协议
 					<div className="type-chips">
-					  <button type="button" className={`chip ${editForm.protocol === 'tcp' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, protocol: 'tcp' }))}>TCP</button>
-					  <button type="button" className={`chip ${editForm.protocol === 'udp' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, protocol: 'udp' }))}>UDP</button>
-					</div>
-				  </label>
+				  <button type="button" className={`chip ${editForm.protocol === 'ping' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, protocol: 'ping' }))}>PING</button>
+				  <button type="button" className={`chip ${editForm.protocol === 'tcp' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, protocol: 'tcp' }))}>TCP</button>
+				  <button type="button" className={`chip ${editForm.protocol === 'udp' ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, protocol: 'udp' }))}>UDP</button>
+				</div>
+			  </label>
 				  {editForm.protocol === 'udp' ? (
 					<>
 					  <label>
@@ -4261,7 +4296,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 	  <ConfirmDialog
 		open={Boolean(pendingDeleteNode)}
 		title="确认删除该节点？"
-		description={`节点「${pendingDeleteNode?.name || pendingDeleteNode?.node_uid || ''}」将从当前节点组移除，删除后不可恢复。`}
+		description={`节点「${pendingDeleteNode?.name || pendingDeleteNode?.node_uid || ''}」将从当前节点列表移除，删除后不可恢复。`}
 		confirmText="确认删除"
 		confirmVariant="danger"
 		confirming={deletingNodeFromCard}

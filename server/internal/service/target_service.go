@@ -307,6 +307,7 @@ func (s *TargetService) CheckNow(id uint) (*model.CheckResult, error) {
 			CheckedAt: time.Now(),
 		}
 	}
+	s.decoratePingResult(ctx, target, &result)
 
 	if err := s.DB.Create(&result).Error; err != nil {
 		return nil, err
@@ -318,6 +319,86 @@ func (s *TargetService) CheckNow(id uint) (*model.CheckResult, error) {
 	}
 
 	return &result, nil
+}
+
+const pingMetaPrefix = "ping_meta:"
+
+func (s *TargetService) decoratePingResult(ctx context.Context, target model.MonitorTarget, result *model.CheckResult) {
+	if result == nil || !result.Success {
+		return
+	}
+	typeVal := strings.TrimSpace(strings.ToLower(target.Type))
+	if typeVal != "port" && typeVal != "ping" {
+		return
+	}
+	if readPortProtocolFromConfig(target.ConfigJSON) != "ping" && typeVal != "ping" {
+		return
+	}
+	host := pingHostFromEndpoint(target.Endpoint)
+	if host == "" {
+		return
+	}
+	resolved, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(resolved) == 0 {
+		return
+	}
+	ipText := strings.TrimSpace(resolved[0].IP.String())
+	if ipText == "" {
+		return
+	}
+	geoText := ""
+	if s.GeoResolver != nil {
+		if region, lookupErr := s.GeoResolver.Lookup(ipText); lookupErr == nil {
+			geoText = strings.TrimSpace(region)
+		}
+	}
+	payload, err := json.Marshal(map[string]string{
+		"ip":  ipText,
+		"geo": geoText,
+	})
+	if err != nil {
+		return
+	}
+	result.ErrorMsg = pingMetaPrefix + string(payload)
+}
+
+func readPortProtocolFromConfig(raw string) string {
+	type portConfig struct {
+		Protocol string `json:"protocol"`
+	}
+	cfg := portConfig{Protocol: "ping"}
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return cfg.Protocol
+	}
+	_ = json.Unmarshal([]byte(trimmed), &cfg)
+	if cfg.Protocol != "tcp" && cfg.Protocol != "udp" && cfg.Protocol != "ping" {
+		return "ping"
+	}
+	return cfg.Protocol
+}
+
+func pingHostFromEndpoint(endpoint string) string {
+	trimmed := strings.TrimSpace(endpoint)
+	if trimmed == "" {
+		return ""
+	}
+	if u, err := url.Parse(trimmed); err == nil && strings.TrimSpace(u.Hostname()) != "" {
+		return strings.TrimSpace(u.Hostname())
+	}
+	if host, _, err := net.SplitHostPort(trimmed); err == nil {
+		return strings.TrimSpace(host)
+	}
+	if strings.HasPrefix(trimmed, "[") && strings.Contains(trimmed, "]") {
+		return strings.Trim(strings.TrimSpace(trimmed), "[]")
+	}
+	if idx := strings.LastIndex(trimmed, ":"); idx > 0 && idx < len(trimmed)-1 && strings.Count(trimmed, ":") == 1 {
+		host := strings.TrimSpace(trimmed[:idx])
+		if host != "" {
+			return host
+		}
+	}
+	return trimmed
 }
 
 func (s *TargetService) FinanceSummary(id uint) (map[string]any, error) {

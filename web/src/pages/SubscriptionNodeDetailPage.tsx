@@ -266,7 +266,7 @@ function SubscriptionNodeDetailPage({ token, notify, theme }: { token: string; n
 			<ConfirmDialog
 				open={confirmDeleteNode}
 				title="确认删除该节点？"
-				description="仅会从当前节点组移除该节点，删除后不可恢复。"
+				description="仅会从当前节点列表移除该节点，删除后不可恢复。"
 				confirmText="确认删除"
 				confirmVariant="danger"
 				confirming={deletingNode}

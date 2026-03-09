@@ -9,8 +9,17 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/icmp"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 type Checker interface {
@@ -70,13 +79,15 @@ type portConfig struct {
 }
 
 func parsePortConfig(raw string) portConfig {
-	cfg := portConfig{Protocol: "tcp", UDPMode: "send_only", UDPPayload: "ping"}
+	cfg := portConfig{Protocol: "ping", UDPMode: "send_only", UDPPayload: "ping"}
 	if strings.TrimSpace(raw) == "" {
 		return cfg
 	}
 	_ = json.Unmarshal([]byte(raw), &cfg)
-	if cfg.Protocol != "udp" {
-		cfg.Protocol = "tcp"
+	switch cfg.Protocol {
+	case "ping", "tcp", "udp":
+	default:
+		cfg.Protocol = "ping"
 	}
 	if cfg.UDPMode != "request_response" {
 		cfg.UDPMode = "send_only"
@@ -96,7 +107,149 @@ func (c *PortChecker) Check(ctx context.Context, target model.MonitorTarget) (mo
 	if protocol == "udp" {
 		return c.checkUDP(ctx, target, cfg), nil, nil
 	}
-	return c.checkTCP(ctx, target), nil, nil
+	if protocol == "tcp" {
+		return c.checkTCP(ctx, target), nil, nil
+	}
+	return c.checkPing(ctx, target), nil, nil
+
+}
+
+func pingHostFromEndpoint(endpoint string) string {
+	trimmed := strings.TrimSpace(endpoint)
+	if trimmed == "" {
+		return ""
+	}
+	if u, err := url.Parse(trimmed); err == nil && strings.TrimSpace(u.Hostname()) != "" {
+		return strings.TrimSpace(u.Hostname())
+	}
+	if host, port, err := net.SplitHostPort(trimmed); err == nil && strings.TrimSpace(port) != "" {
+		return strings.TrimSpace(host)
+	}
+	if strings.HasPrefix(trimmed, "[") && strings.Contains(trimmed, "]") {
+		return strings.Trim(strings.TrimSpace(trimmed), "[]")
+	}
+	if idx := strings.LastIndex(trimmed, ":"); idx > 0 && idx < len(trimmed)-1 && strings.Count(trimmed, ":") == 1 {
+		host := strings.TrimSpace(trimmed[:idx])
+		if host != "" {
+			return host
+		}
+	}
+	return trimmed
+}
+
+func (c *PortChecker) checkPing(ctx context.Context, target model.MonitorTarget) model.CheckResult {
+	start := time.Now()
+	host := pingHostFromEndpoint(target.Endpoint)
+	if host == "" {
+		return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: "invalid ping endpoint", CheckedAt: time.Now()}
+	}
+
+	resolved, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(resolved) == 0 {
+		msg := "resolve ping host failed"
+		if err != nil {
+			msg = err.Error()
+		}
+		return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: msg, CheckedAt: time.Now()}
+	}
+
+	ip := resolved[0].IP
+	network := "ip4:icmp"
+	listenAddr := "0.0.0.0"
+	var reqType icmp.Type = ipv4.ICMPTypeEcho
+	var replyType icmp.Type = ipv4.ICMPTypeEchoReply
+	protoNum := 1
+	if ip.To4() == nil {
+		network = "ip6:ipv6-icmp"
+		listenAddr = "::"
+		reqType = ipv6.ICMPTypeEchoRequest
+		replyType = ipv6.ICMPTypeEchoReply
+		protoNum = 58
+	}
+
+	conn, err := icmp.ListenPacket(network, listenAddr)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "operation not permitted") || strings.Contains(strings.ToLower(err.Error()), "permission denied") {
+			if latencyMS, ok, cmdErr := checkPingViaCommand(ctx, host, target.TimeoutMS, ip.To4() == nil); cmdErr == nil && ok {
+				return model.CheckResult{TargetID: target.ID, Success: true, LatencyMS: latencyMS, CheckedAt: time.Now()}
+			}
+		}
+		return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: err.Error(), CheckedAt: time.Now()}
+	}
+	defer conn.Close()
+
+	_ = conn.SetDeadline(time.Now().Add(time.Duration(target.TimeoutMS) * time.Millisecond))
+	echoID := os.Getpid() & 0xffff
+	echoSeq := int(time.Now().UnixNano() & 0xffff)
+	msg := icmp.Message{
+		Type: reqType,
+		Code: 0,
+		Body: &icmp.Echo{ID: echoID, Seq: echoSeq, Data: []byte("all-monitor-ping")},
+	}
+	payload, err := msg.Marshal(nil)
+	if err != nil {
+		return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: err.Error(), CheckedAt: time.Now()}
+	}
+	if _, err := conn.WriteTo(payload, &net.IPAddr{IP: ip}); err != nil {
+		return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: err.Error(), CheckedAt: time.Now()}
+	}
+
+	buf := make([]byte, 1500)
+	for {
+		n, _, readErr := conn.ReadFrom(buf)
+		if readErr != nil {
+			return model.CheckResult{TargetID: target.ID, Success: false, LatencyMS: int(time.Since(start).Milliseconds()), ErrorMsg: readErr.Error(), CheckedAt: time.Now()}
+		}
+		parsed, parseErr := icmp.ParseMessage(protoNum, buf[:n])
+		if parseErr != nil || parsed.Type != replyType {
+			continue
+		}
+		echo, ok := parsed.Body.(*icmp.Echo)
+		if ok && echo.ID == echoID && echo.Seq == echoSeq {
+			return model.CheckResult{TargetID: target.ID, Success: true, LatencyMS: int(time.Since(start).Milliseconds()), CheckedAt: time.Now()}
+		}
+	}
+}
+
+func checkPingViaCommand(ctx context.Context, host string, timeoutMS int, ipv6 bool) (int, bool, error) {
+	timeoutSec := timeoutMS / 1000
+	if timeoutSec <= 0 {
+		timeoutSec = 1
+	}
+	args := []string{"-n", "-c", "1", "-W", strconv.Itoa(timeoutSec), host}
+	cmdName := "ping"
+	if ipv6 {
+		if _, err := exec.LookPath("ping6"); err == nil {
+			cmdName = "ping6"
+		}
+	}
+	cmd := exec.CommandContext(ctx, cmdName, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return 0, false, err
+	}
+	latency := parsePingLatencyMS(string(out))
+	if latency <= 0 {
+		return int(time.Duration(timeoutSec) * time.Second / time.Millisecond), true, nil
+	}
+	return latency, true, nil
+}
+
+var pingLatencyPattern = regexp.MustCompile(`(?i)(?:time|时间)\s*[=<＝]?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:ms|毫秒)`)
+
+func parsePingLatencyMS(out string) int {
+	m := pingLatencyPattern.FindStringSubmatch(out)
+	if len(m) < 2 {
+		return 0
+	}
+	val, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0
+	}
+	if val < 0 {
+		return 0
+	}
+	return int(val + 0.5)
 }
 
 func (c *PortChecker) checkTCP(ctx context.Context, target model.MonitorTarget) model.CheckResult {
@@ -304,6 +457,10 @@ func SelectChecker(targetType string) (Checker, error) {
 		return &PortChecker{}, nil
 	case "tcp", "server", "node":
 		return &PortChecker{ForceProtocol: "tcp"}, nil
+	case "udp":
+		return &PortChecker{ForceProtocol: "udp"}, nil
+	case "ping":
+		return &PortChecker{ForceProtocol: "ping"}, nil
 	case "subscription":
 		return &HTTPChecker{}, nil
 	case "node_group":

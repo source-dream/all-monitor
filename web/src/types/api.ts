@@ -187,7 +187,7 @@ export type SubscriptionLatencyJobEvent = {
 export type TrackingMetricMode = 'pv' | 'uv' | 'both'
 export type UVIdentity = 'client_id' | 'ip_ua_hash' | 'ip_client_hash'
 export type UserGroupMode = 'ip' | 'device_id' | 'ip_device'
-export type PortProtocol = 'tcp' | 'udp'
+export type PortProtocol = 'ping' | 'tcp' | 'udp'
 export type UDPMode = 'send_only' | 'request_response'
 
 export type TrackingConfig = {

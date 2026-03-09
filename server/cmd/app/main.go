@@ -327,7 +327,7 @@ func normalizeLegacyTargetTypes(db *gorm.DB) (int, error) {
 			newType = "site"
 		case "api":
 			newType = "ai"
-		case "tcp", "server", "node":
+		case "tcp", "udp", "ping", "server", "node":
 			newType = "port"
 		}
 
@@ -340,7 +340,7 @@ func normalizeLegacyTargetTypes(db *gorm.DB) (int, error) {
 			cfg := map[string]any{}
 			_ = json.Unmarshal([]byte(configJSON), &cfg)
 			if _, ok := cfg["protocol"]; !ok {
-				cfg["protocol"] = "tcp"
+				cfg["protocol"] = "ping"
 			}
 			if _, ok := cfg["udp_mode"]; !ok {
 				cfg["udp_mode"] = "send_only"

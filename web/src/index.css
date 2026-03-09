@@ -815,8 +815,10 @@ input[type='number']::-webkit-inner-spin-button {
 .endpoint-link {
   color: var(--text-muted);
   font-size: 0.9rem;
-  text-decoration: none;
-  border-bottom: 1px dashed transparent;
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
 }
 
 .card-head-main .endpoint-link {
@@ -830,7 +832,7 @@ input[type='number']::-webkit-inner-spin-button {
 
 .endpoint-link:hover {
   color: var(--brand);
-  border-bottom-color: color-mix(in srgb, var(--brand) 60%, transparent);
+  text-decoration-color: color-mix(in srgb, var(--brand) 60%, transparent);
 }
 
 .toast-stack {
