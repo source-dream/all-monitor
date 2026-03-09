@@ -48,6 +48,9 @@ systemctl enable --now all-monitor.service
 # 服务监听端口（Docker -p 左右端口建议保持一致）
 APP_PORT=8317
 
+# 应用基础路径（默认 /；如反代到子路径可设为 /monitor）
+APP_BASE_PATH=/
+
 # 数据库类型：sqlite / postgres
 DB_DRIVER=sqlite
 
@@ -77,13 +80,13 @@ IP_REGION_DB=/var/lib/all-monitor/ip2region.xdb
 部署
 
 ```docker
-docker run -d --name all-monitor --restart unless-stopped -p 8317:8317 -e APP_PORT=8317 -e DB_DRIVER=sqlite -e SQLITE_DSN=/var/lib/all-monitor/all-monitor.db -e JWT_SECRET='请替换为强随机密钥' -e CORS_ALLOW='auto' -v all-monitor-data:/var/lib/all-monitor ghcr.io/source-dream/all-monitor:latest
+docker run -d --name all-monitor --restart unless-stopped -p 8317:8317 -e APP_PORT=8317 -e APP_BASE_PATH=/ -e DB_DRIVER=sqlite -e SQLITE_DSN=/var/lib/all-monitor/all-monitor.db -e JWT_SECRET='请替换为强随机密钥' -e CORS_ALLOW='auto' -v all-monitor-data:/var/lib/all-monitor ghcr.io/source-dream/all-monitor:latest
 ```
 
 更新
 
 ```
-docker pull ghcr.io/source-dream/all-monitor:latest && docker rm -f all-monitor && docker run -d --name all-monitor --restart unless-stopped -p 8317:8317 -e APP_PORT=8317 -e DB_DRIVER=sqlite -e SQLITE_DSN=/var/lib/all-monitor/all-monitor.db -e JWT_SECRET='请替换为强随机密钥' -e CORS_ALLOW='auto' -v all-monitor-data:/var/lib/all-monitor ghcr.io/source-dream/all-monitor:latest
+docker pull ghcr.io/source-dream/all-monitor:latest && docker rm -f all-monitor && docker run -d --name all-monitor --restart unless-stopped -p 8317:8317 -e APP_PORT=8317 -e APP_BASE_PATH=/ -e DB_DRIVER=sqlite -e SQLITE_DSN=/var/lib/all-monitor/all-monitor.db -e JWT_SECRET='请替换为强随机密钥' -e CORS_ALLOW='auto' -v all-monitor-data:/var/lib/all-monitor ghcr.io/source-dream/all-monitor:latest
 ```
 
 ## 首次运行默认配置

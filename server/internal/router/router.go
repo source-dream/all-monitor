@@ -7,12 +7,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func Register(r *gin.Engine, h *handler.Handler, jwtSecret string) {
-	r.GET("/healthz", func(c *gin.Context) {
+func Register(r *gin.Engine, h *handler.Handler, jwtSecret, basePath string) {
+	root := r.Group(basePath)
+	root.GET("/healthz", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	api := r.Group("/api")
+	api := root.Group("/api")
 	{
 		api.GET("/init/status", h.InitStatus)
 		api.POST("/init/setup", h.Setup)

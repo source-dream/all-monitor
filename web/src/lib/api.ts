@@ -1,10 +1,29 @@
 const AUTH_EXPIRED_EVENT = 'all_monitor_auth_expired'
 
+type RuntimeWindow = Window & {
+	__APP_BASE_PATH__?: string
+}
+
 type ApiBody<T> = {
 	code: number
 	message: string
 	data: T
 }
+
+function normalizeBasePath(raw: string | undefined): string {
+	const trimmed = (raw ?? '').trim()
+	if (!trimmed || trimmed === '/') return '/'
+	const withLeading = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+	const withoutTrailing = withLeading.replace(/\/+$/, '')
+	return withoutTrailing || '/'
+}
+
+function resolveAppBasePath(): string {
+	if (typeof window === 'undefined') return '/'
+	return normalizeBasePath((window as RuntimeWindow).__APP_BASE_PATH__)
+}
+
+const APP_BASE_PATH = resolveAppBasePath()
 
 function resolveAPIBase(): string {
 	const fromEnv = (import.meta.env.VITE_API_BASE as string | undefined)?.trim()
@@ -14,7 +33,8 @@ function resolveAPIBase(): string {
 	if (hostname === 'localhost' && /^51\d\d$/.test(port)) {
 		return 'http://localhost:8080'
 	}
-	return ''
+	if (APP_BASE_PATH === '/') return ''
+	return APP_BASE_PATH
 }
 
 const API_BASE = resolveAPIBase()
@@ -49,4 +69,4 @@ async function api<T>(path: string, options?: RequestInit, token?: string): Prom
 }
 
 export type { ApiBody }
-export { api, API_BASE, AUTH_EXPIRED_EVENT }
+export { api, API_BASE, APP_BASE_PATH, AUTH_EXPIRED_EVENT }

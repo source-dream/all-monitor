@@ -28,7 +28,7 @@ import { ToastViewport } from './components/ui/ToastViewport'
 import { nodeLatencyState, isSubscriptionNodeAvailable, subscriptionNodeCopyText } from './features/subscription/nodeHelpers'
 import { useToastManager } from './hooks/useToastManager'
 import { useWorkspaceScrollbar } from './hooks/useWorkspaceScrollbar'
-import { api, API_BASE, AUTH_EXPIRED_EVENT } from './lib/api'
+import { api, API_BASE, APP_BASE_PATH, AUTH_EXPIRED_EVENT } from './lib/api'
 import type { ApiBody } from './lib/api'
 import { copyTextToClipboard } from './lib/clipboard'
 import { fetchGithubReleases, resolveVersionUpdateNotice } from './lib/version'
@@ -2724,9 +2724,9 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
   const detailNextRun = target && target.type !== 'tracking'
 	? formatNextRun(detailLastRunAt, detailIntervalSec, nowTick)
 	: '--'
-  const guidePublicOrigin = useMemo(() => {
+	const guidePublicOrigin = useMemo(() => {
 	if (typeof window !== 'undefined' && window.location?.origin) {
-	  return window.location.origin
+	  return APP_BASE_PATH === '/' ? window.location.origin : `${window.location.origin}${APP_BASE_PATH}`
 	}
 	return API_BASE
   }, [])
@@ -4422,7 +4422,7 @@ function App() {
   }
 
   return (
-    <BrowserRouter>
+	<BrowserRouter basename={APP_BASE_PATH === '/' ? undefined : APP_BASE_PATH}>
 	  <ToastViewport toasts={toasts} onClose={removeToast} />
       <Routes>
         <Route
@@ -4444,7 +4444,7 @@ function App() {
 		<Route path="/targets/:id/subscription/nodes/:uid" element={<SubscriptionNodeDetailPage token={token} notify={notify} theme={theme} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </BrowserRouter>
+	</BrowserRouter>
   )
 }
 

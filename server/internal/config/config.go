@@ -7,32 +7,34 @@ import (
 )
 
 type Config struct {
-	AppPort    string
-	DBDriver   string
-	DBHost     string
-	DBPort     string
-	DBUser     string
-	DBPass     string
-	DBName     string
-	SQLiteDSN  string
-	JWTSecret  string
-	CORSAllow  string
-	IPRegionDB string
+	AppPort     string
+	AppBasePath string
+	DBDriver    string
+	DBHost      string
+	DBPort      string
+	DBUser      string
+	DBPass      string
+	DBName      string
+	SQLiteDSN   string
+	JWTSecret   string
+	CORSAllow   string
+	IPRegionDB  string
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		AppPort:    getOrDefault("APP_PORT", "8080"),
-		DBDriver:   getOrDefault("DB_DRIVER", "sqlite"),
-		DBHost:     getOrDefault("DB_HOST", "127.0.0.1"),
-		DBPort:     getOrDefault("DB_PORT", "5432"),
-		DBUser:     getOrDefault("DB_USER", "postgres"),
-		DBPass:     getOrDefault("DB_PASS", "postgres"),
-		DBName:     getOrDefault("DB_NAME", "all_monitor"),
-		SQLiteDSN:  getOrDefault("SQLITE_DSN", "data/all-monitor.db"),
-		JWTSecret:  os.Getenv("JWT_SECRET"),
-		CORSAllow:  getOrDefault("CORS_ALLOW", "http://localhost:5173"),
-		IPRegionDB: getOrDefault("IP_REGION_DB", "data/ip2region.xdb"),
+		AppPort:     getOrDefault("APP_PORT", "8080"),
+		AppBasePath: normalizeBasePath(getOrDefault("APP_BASE_PATH", "/")),
+		DBDriver:    getOrDefault("DB_DRIVER", "sqlite"),
+		DBHost:      getOrDefault("DB_HOST", "127.0.0.1"),
+		DBPort:      getOrDefault("DB_PORT", "5432"),
+		DBUser:      getOrDefault("DB_USER", "postgres"),
+		DBPass:      getOrDefault("DB_PASS", "postgres"),
+		DBName:      getOrDefault("DB_NAME", "all_monitor"),
+		SQLiteDSN:   getOrDefault("SQLITE_DSN", "data/all-monitor.db"),
+		JWTSecret:   os.Getenv("JWT_SECRET"),
+		CORSAllow:   getOrDefault("CORS_ALLOW", "http://localhost:5173"),
+		IPRegionDB:  getOrDefault("IP_REGION_DB", "data/ip2region.xdb"),
 	}
 
 	if cfg.JWTSecret == "" {
@@ -54,4 +56,19 @@ func getOrDefault(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+func normalizeBasePath(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "/" {
+		return "/"
+	}
+	if !strings.HasPrefix(trimmed, "/") {
+		trimmed = "/" + trimmed
+	}
+	trimmed = strings.TrimRight(trimmed, "/")
+	if trimmed == "" {
+		return "/"
+	}
+	return trimmed
 }

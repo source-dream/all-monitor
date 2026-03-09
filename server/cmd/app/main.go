@@ -106,8 +106,8 @@ func main() {
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders: []string{"Authorization", "Content-Type"},
 	}))
-	router.Register(r, h, cfg.JWTSecret)
-	registerEmbeddedWeb(r)
+	router.Register(r, h, cfg.JWTSecret, cfg.AppBasePath)
+	registerEmbeddedWeb(r, cfg.AppBasePath)
 
 	listener, boundPort, err := listenWithFallback(cfg.AppPort, 20)
 	if err != nil {
@@ -134,7 +134,7 @@ func ensureDefaultEnvFile(path string) error {
 		return err
 	}
 
-	content := fmt.Sprintf("APP_PORT=8080\nDB_DRIVER=sqlite\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_USER=sqlite\nDB_PASS=sqlite\nDB_NAME=all_monitor\nSQLITE_DSN=data/all-monitor.db\nJWT_SECRET=%s\nCORS_ALLOW=http://localhost:5173,auto\nIP_REGION_DB=data/ip2region.xdb\n", jwtSecret)
+	content := fmt.Sprintf("APP_PORT=8080\nAPP_BASE_PATH=/\nDB_DRIVER=sqlite\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_USER=sqlite\nDB_PASS=sqlite\nDB_NAME=all_monitor\nSQLITE_DSN=data/all-monitor.db\nJWT_SECRET=%s\nCORS_ALLOW=http://localhost:5173,auto\nIP_REGION_DB=data/ip2region.xdb\n", jwtSecret)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return err
 	}
@@ -151,7 +151,7 @@ func generateJWTSecret() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
-func registerEmbeddedWeb(r *gin.Engine) {
+func registerEmbeddedWeb(r *gin.Engine, basePath string) {
 	distFS, err := webstatic.DistFS()
 	if err != nil || !webstatic.HasIndex(distFS) {
 		log.Printf("embedded web assets not found, frontend static serving disabled")
@@ -165,19 +165,36 @@ func registerEmbeddedWeb(r *gin.Engine) {
 	}
 
 	fileServer := http.FileServer(http.FS(distFS))
+	indexWithBasePath := injectBasePath(indexHTML, basePath)
+	apiPrefix := basePath + "/api"
+	if basePath == "/" {
+		apiPrefix = "/api"
+	}
+	basePathPrefix := strings.TrimRight(basePath, "/") + "/"
 	r.NoRoute(func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+		requestPath := c.Request.URL.Path
+		if strings.HasPrefix(requestPath, apiPrefix+"/") || requestPath == apiPrefix {
 			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
+		}
+		if basePath != "/" {
+			if requestPath != basePath && !strings.HasPrefix(requestPath, basePathPrefix) {
+				c.Status(http.StatusNotFound)
+				return
+			}
 		}
 		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead {
 			c.Status(http.StatusNotFound)
 			return
 		}
 
-		path := strings.TrimPrefix(c.Request.URL.Path, "/")
+		relativePath := requestPath
+		if basePath != "/" {
+			relativePath = strings.TrimPrefix(requestPath, basePath)
+		}
+		path := strings.TrimPrefix(relativePath, "/")
 		if path == "" || path == "index.html" {
-			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+			c.Data(http.StatusOK, "text/html; charset=utf-8", indexWithBasePath)
 			return
 		}
 
@@ -187,9 +204,25 @@ func registerEmbeddedWeb(r *gin.Engine) {
 			return
 		}
 
-		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexWithBasePath)
 	})
 	log.Printf("embedded web assets enabled")
+}
+
+func injectBasePath(indexHTML []byte, basePath string) []byte {
+	if basePath == "" {
+		basePath = "/"
+	}
+	html := string(indexHTML)
+	if basePath != "/" {
+		html = strings.ReplaceAll(html, "href=\"/", fmt.Sprintf("href=\"%s/", basePath))
+		html = strings.ReplaceAll(html, "src=\"/", fmt.Sprintf("src=\"%s/", basePath))
+	}
+	snippet := fmt.Sprintf("<script>window.__APP_BASE_PATH__=%q;</script>", basePath)
+	if strings.Contains(html, "</head>") {
+		return []byte(strings.Replace(html, "</head>", snippet+"</head>", 1))
+	}
+	return []byte(snippet + html)
 }
 
 func listenWithFallback(basePort string, maxRetry int) (net.Listener, string, error) {
