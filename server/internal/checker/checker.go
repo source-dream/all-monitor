@@ -2,6 +2,7 @@ package checker
 
 import (
 	"all-monitor/server/internal/model"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,13 +35,89 @@ type PortChecker struct {
 type AIRelayChecker struct{}
 type TrackingChecker struct{}
 
+type httpConfig struct {
+	Method         string            `json:"method"`
+	Headers        map[string]string `json:"headers"`
+	Body           string            `json:"body"`
+	ExpectedStatus string            `json:"expected_status"`
+}
+
+func parseHTTPConfig(raw string) httpConfig {
+	cfg := httpConfig{
+		Method:         http.MethodGet,
+		Headers:        map[string]string{},
+		Body:           "",
+		ExpectedStatus: "2xx",
+	}
+	if strings.TrimSpace(raw) == "" {
+		return cfg
+	}
+	_ = json.Unmarshal([]byte(raw), &cfg)
+	cfg.Method = strings.ToUpper(strings.TrimSpace(cfg.Method))
+	switch cfg.Method {
+	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodHead, http.MethodOptions:
+	default:
+		cfg.Method = http.MethodGet
+	}
+	if cfg.Headers == nil {
+		cfg.Headers = map[string]string{}
+	}
+	if strings.TrimSpace(cfg.ExpectedStatus) == "" {
+		cfg.ExpectedStatus = "2xx"
+	}
+	return cfg
+}
+
+func validateExpectedStatus(rule string, statusCode int) (bool, bool) {
+	trimmed := strings.TrimSpace(strings.ToLower(rule))
+	if trimmed == "" {
+		trimmed = "2xx"
+	}
+	if len(trimmed) == 3 && trimmed[1:] == "xx" && trimmed[0] >= '1' && trimmed[0] <= '5' {
+		base := int(trimmed[0]-'0') * 100
+		return statusCode >= base && statusCode < base+100, true
+	}
+	parts := strings.Split(trimmed, ",")
+	hasCode := false
+	for _, part := range parts {
+		codeText := strings.TrimSpace(part)
+		if codeText == "" {
+			continue
+		}
+		code, err := strconv.Atoi(codeText)
+		if err != nil {
+			continue
+		}
+		hasCode = true
+		if statusCode == code {
+			return true, true
+		}
+	}
+	if hasCode {
+		return false, true
+	}
+	return false, false
+}
+
 func (c *HTTPChecker) Type() string { return "http" }
 
 func (c *HTTPChecker) Check(ctx context.Context, target model.MonitorTarget) (model.CheckResult, *model.RelayFinanceSnapshot, error) {
 	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.Endpoint, nil)
+	cfg := parseHTTPConfig(target.ConfigJSON)
+	var bodyReader io.Reader
+	if cfg.Method != http.MethodGet && cfg.Method != http.MethodHead && strings.TrimSpace(cfg.Body) != "" {
+		bodyReader = bytes.NewBufferString(cfg.Body)
+	}
+	req, err := http.NewRequestWithContext(ctx, cfg.Method, target.Endpoint, bodyReader)
 	if err != nil {
 		return model.CheckResult{}, nil, err
+	}
+	for key, value := range cfg.Headers {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			continue
+		}
+		req.Header.Set(k, value)
 	}
 
 	client := &http.Client{Timeout: time.Duration(target.TimeoutMS) * time.Millisecond}
@@ -56,12 +133,17 @@ func (c *HTTPChecker) Check(ctx context.Context, target model.MonitorTarget) (mo
 	}
 	defer resp.Body.Close()
 
-	success := resp.StatusCode >= 200 && resp.StatusCode < 400
+	success, validRule := validateExpectedStatus(cfg.ExpectedStatus, resp.StatusCode)
 	result := model.CheckResult{
 		TargetID:  target.ID,
 		Success:   success,
 		LatencyMS: int(time.Since(start).Milliseconds()),
 		CheckedAt: time.Now(),
+	}
+	if !validRule {
+		result.Success = false
+		result.ErrorMsg = "invalid expected_status config"
+		return result, nil, nil
 	}
 	if !success {
 		result.ErrorMsg = resp.Status

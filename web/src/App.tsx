@@ -39,6 +39,8 @@ import type {
 	CheckResult,
 	CreateTargetPayload,
 	FinanceSummary,
+	HTTPConfig,
+	HTTPMethod,
 	PortConfig,
 	PortProtocol,
 	PreferenceDefaultsPayload,
@@ -536,6 +538,53 @@ function normalizeImportItem(raw: unknown): { payload?: CreateTargetPayload; err
 	}
 }
 
+const HTTP_METHOD_OPTIONS: HTTPMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
+
+function readHTTPConfig(configJSON?: string): HTTPConfig {
+	const defaults: HTTPConfig = {
+		method: 'GET',
+		headers: {},
+		body: '',
+		expected_status: '2xx',
+	}
+	if (!configJSON) return defaults
+	try {
+		const parsed = JSON.parse(configJSON) as {
+			method?: string
+			headers?: unknown
+			body?: unknown
+			expected_status?: unknown
+		}
+		const method = HTTP_METHOD_OPTIONS.includes(String(parsed.method ?? '').toUpperCase() as HTTPMethod)
+			? (String(parsed.method).toUpperCase() as HTTPMethod)
+			: 'GET'
+		const headers = parsed.headers && typeof parsed.headers === 'object' && !Array.isArray(parsed.headers)
+			? Object.fromEntries(Object.entries(parsed.headers as Record<string, unknown>).map(([k, v]) => [k, String(v ?? '')]))
+			: {}
+		return {
+			method,
+			headers,
+			body: typeof parsed.body === 'string' ? parsed.body : '',
+			expected_status: typeof parsed.expected_status === 'string' && parsed.expected_status.trim() ? parsed.expected_status.trim() : '2xx',
+		}
+	} catch {
+		return defaults
+	}
+}
+
+function isValidSiteURL(value: string): boolean {
+	const trimmed = value.trim()
+	if (!trimmed) return false
+	if (trimmed.includes('：')) return false
+	if (!(trimmed.startsWith('http://') || trimmed.startsWith('https://'))) return false
+	try {
+		const parsed = new URL(trimmed)
+		return Boolean(parsed.hostname)
+	} catch {
+		return false
+	}
+}
+
 function readAPIKey(configJSON?: string): string {
 	if (!configJSON) return ''
 	try {
@@ -1007,6 +1056,10 @@ function DashboardPage({
   const [createSubTargetTimeoutMS, setCreateSubTargetTimeoutMS] = useState(SUBSCRIPTION_CREATE_DEFAULTS.timeout_ms)
   const [createSubManualExpireAt, setCreateSubManualExpireAt] = useState('')
   const [createNodeGroupURIs, setCreateNodeGroupURIs] = useState('')
+  const [createHTTPMethod, setCreateHTTPMethod] = useState<HTTPMethod>('GET')
+  const [createHTTPHeaders, setCreateHTTPHeaders] = useState('')
+  const [createHTTPBody, setCreateHTTPBody] = useState('')
+  const [createHTTPExpectedStatus, setCreateHTTPExpectedStatus] = useState('2xx')
   const [createPortProtocol, setCreatePortProtocol] = useState<PortProtocol>('ping')
   const [createUDPMode, setCreateUDPMode] = useState<UDPMode>('send_only')
   const [createUDPPayload, setCreateUDPPayload] = useState('ping')
@@ -1203,6 +1256,20 @@ function DashboardPage({
     const subscriptionTimeoutMS = Number.isFinite(subscriptionTimeoutRaw)
       ? Math.max(200, Math.round(subscriptionTimeoutRaw))
       : createSubTargetTimeoutMS
+    let siteHeaders: Record<string, string> = {}
+    if (createType === 'site' && createHTTPHeaders.trim()) {
+      try {
+        const parsedHeaders = JSON.parse(createHTTPHeaders) as unknown
+        if (!parsedHeaders || typeof parsedHeaders !== 'object' || Array.isArray(parsedHeaders)) {
+          setError('站点请求头必须是 JSON 对象')
+          return
+        }
+        siteHeaders = Object.fromEntries(Object.entries(parsedHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v ?? '')]))
+      } catch {
+        setError('站点请求头 JSON 格式不正确')
+        return
+      }
+    }
     const payload: CreateTargetPayload = {
       name: String(form.get('name') ?? ''),
       type: createType,
@@ -1210,7 +1277,14 @@ function DashboardPage({
 	  interval_sec: createType === 'tracking' ? 60 : (createType === 'subscription' ? subscriptionIntervalSec : (createType === 'node_group' ? 0 : Number(form.get('interval_sec') ?? 60))),
 	  timeout_ms: createType === 'tracking' ? 5000 : (createType === 'subscription' ? subscriptionTimeoutMS : (createType === 'node_group' ? 5000 : Number(form.get('timeout_ms') ?? 5000))),
       enabled: true,
-	  config_json: createType === 'ai'
+	  config_json: createType === 'site'
+		? JSON.stringify({
+			method: createHTTPMethod,
+			headers: siteHeaders,
+			body: createHTTPBody,
+			expected_status: createHTTPExpectedStatus.trim() || '2xx',
+		})
+		: (createType === 'ai'
 		? JSON.stringify({ api_key: createAPIKey.trim() })
 		: ((createType === 'subscription' || createType === 'node_group')
 			? JSON.stringify({
@@ -1250,7 +1324,7 @@ function DashboardPage({
 				user_group_mode: 'ip_device',
 				inactive_threshold_min: createInactiveThreshold,
 			})
-			: '{}'))),
+			: '{}')))),
     }
 
 	if (createType === 'ai' && !createAPIKey.trim()) {
@@ -1301,6 +1375,10 @@ function DashboardPage({
 		setError('UDP 校验回包模式下请填写期望回包')
 		return
 	}
+	if (createType === 'site' && !isValidSiteURL(String(form.get('endpoint') ?? ''))) {
+		setError('站点地址必须是完整 URL（http:// 或 https://）')
+		return
+	}
 	if (createType !== 'tracking' && createType !== 'node_group' && !String(form.get('endpoint') ?? '').trim()) {
 		setError('该类型必须填写地址')
 		return
@@ -1313,6 +1391,10 @@ function DashboardPage({
 	  setCreateType('site')
 	  setCreateAPIKey('')
 	  setCreateSubManualExpireAt('')
+	  setCreateHTTPMethod('GET')
+	  setCreateHTTPHeaders('')
+	  setCreateHTTPBody('')
+	  setCreateHTTPExpectedStatus('2xx')
 	  setCreatePortProtocol('ping')
 	  setCreateUDPMode('send_only')
 	  setCreateUDPPayload('ping')
@@ -1894,6 +1976,12 @@ function DashboardPage({
                     className={`chip ${createType === item.value ? 'active' : ''}`}
 					onClick={() => {
 					  setCreateType(item.value)
+					  if (item.value === 'site') {
+						  setCreateHTTPMethod('GET')
+						  setCreateHTTPHeaders('')
+						  setCreateHTTPBody('')
+						  setCreateHTTPExpectedStatus('2xx')
+					  }
 					  if (item.value === 'tracking') {
 						  setCreateWriteKey(generateWriteKey())
 					  }
@@ -1916,6 +2004,32 @@ function DashboardPage({
 				地址
 				<input name="endpoint" placeholder={createType === 'port' ? '127.0.0.1:6379' : 'https://example.com/health 或 1.2.3.4:443'} required />
 			  </label>
+			) : null}
+			{createType === 'site' ? (
+			  <>
+				<label>
+				  请求方法
+				  <div className="type-chips">
+					{HTTP_METHOD_OPTIONS.map((method) => (
+					  <button key={method} type="button" className={`chip ${createHTTPMethod === method ? 'active' : ''}`} onClick={() => setCreateHTTPMethod(method)}>{method}</button>
+					))}
+				  </div>
+				</label>
+				<label>
+				  成功状态码规则
+				  <input value={createHTTPExpectedStatus} onChange={(e) => setCreateHTTPExpectedStatus(e.target.value)} placeholder="2xx 或 200,201" />
+				</label>
+				<label>
+				  请求头（JSON，可选）
+				  <AutoGrowTextarea value={createHTTPHeaders} onChange={(e) => setCreateHTTPHeaders(e.target.value)} rows={3} placeholder={`{"Authorization":"Bearer xxx"}`} />
+				</label>
+				{createHTTPMethod !== 'GET' && createHTTPMethod !== 'HEAD' ? (
+				  <label>
+					请求体（可选）
+					<AutoGrowTextarea value={createHTTPBody} onChange={(e) => setCreateHTTPBody(e.target.value)} rows={3} placeholder='{"ping":"pong"}' />
+				  </label>
+				) : null}
+			  </>
 			) : null}
 			{createType === 'port' ? (
 			  <>
@@ -2520,6 +2634,10 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 	uv_identity: 'client_id' as UVIdentity,
 	user_group_mode: 'ip_device' as UserGroupMode,
 	inactive_threshold_min: 0,
+	http_method: 'GET' as HTTPMethod,
+	http_headers_text: '',
+	http_body: '',
+	http_expected_status: '2xx',
 	protocol: 'ping' as PortProtocol,
 	udp_mode: 'send_only' as UDPMode,
 	udp_payload: 'ping',
@@ -2557,6 +2675,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
       ])
       setTarget(targetData)
 	  const subCfg = readSubscriptionConfig(targetData.config_json)
+	  const httpCfg = readHTTPConfig(targetData.config_json)
 	  const nextEditForm = {
         name: targetData.name,
 		type: normalizeType(targetData.type),
@@ -2564,7 +2683,11 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
         interval_sec: targetData.interval_sec,
         timeout_ms: targetData.timeout_ms,
         enabled: targetData.enabled,
-        api_key: readAPIKey(targetData.config_json),
+		api_key: readAPIKey(targetData.config_json),
+		http_method: httpCfg.method,
+		http_headers_text: Object.keys(httpCfg.headers).length > 0 ? JSON.stringify(httpCfg.headers, null, 2) : '',
+		http_body: httpCfg.body,
+		http_expected_status: httpCfg.expected_status,
 		...readTrackingConfig(targetData.config_json),
 		...readPortConfig(targetData.config_json),
 		...subCfg,
@@ -2852,6 +2975,24 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		setError('UDP 校验回包模式下请填写期望回包')
 		return
 	}
+	if (editForm.type === 'site' && !isValidSiteURL(editForm.endpoint)) {
+		setError('站点地址必须是完整 URL（http:// 或 https://）')
+		return
+	}
+	let siteHeadersForSave: Record<string, string> = {}
+	if (editForm.type === 'site' && editForm.http_headers_text.trim()) {
+		try {
+			const parsedHeaders = JSON.parse(editForm.http_headers_text) as unknown
+			if (!parsedHeaders || typeof parsedHeaders !== 'object' || Array.isArray(parsedHeaders)) {
+				setError('站点请求头必须是 JSON 对象')
+				return
+			}
+			siteHeadersForSave = Object.fromEntries(Object.entries(parsedHeaders as Record<string, unknown>).map(([k, v]) => [k, String(v ?? '')]))
+		} catch {
+			setError('站点请求头 JSON 格式不正确')
+			return
+		}
+	}
 	const normalizedType = normalizeType(editForm.type)
 	const payload = {
 		...editForm,
@@ -2859,7 +3000,14 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 		endpoint: normalizedType === 'tracking' ? 'tracking://ingest' : (normalizedType === 'node_group' ? 'node-group://manual' : editForm.endpoint),
 		interval_sec: normalizedType === 'tracking' ? 60 : (normalizedType === 'node_group' ? 0 : editForm.interval_sec),
 		timeout_ms: normalizedType === 'tracking' ? 5000 : (normalizedType === 'node_group' ? 5000 : editForm.timeout_ms),
-		config_json: normalizedType === 'ai'
+		config_json: normalizedType === 'site'
+		  ? JSON.stringify({
+			  method: editForm.http_method,
+			  headers: siteHeadersForSave,
+			  body: editForm.http_body,
+			  expected_status: editForm.http_expected_status.trim() || '2xx',
+		  })
+		  : (normalizedType === 'ai'
 		  ? JSON.stringify({ api_key: editForm.api_key.trim() })
 		  : ((normalizedType === 'subscription' || normalizedType === 'node_group')
 			  ? JSON.stringify({
@@ -2899,7 +3047,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 				  user_group_mode: editForm.user_group_mode,
 				  inactive_threshold_min: editForm.inactive_threshold_min,
 			  })
-			  : '{}'))),
+			  : '{}')))),
 	}
     setSaving(true)
     try {
@@ -4093,6 +4241,32 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 					required
 				  />
 				</label>
+			  ) : null}
+			  {editForm.type === 'site' ? (
+				<>
+				  <label>
+					请求方法
+					<div className="type-chips">
+					  {HTTP_METHOD_OPTIONS.map((method) => (
+						<button key={method} type="button" className={`chip ${editForm.http_method === method ? 'active' : ''}`} onClick={() => setEditForm((prev) => ({ ...prev, http_method: method }))}>{method}</button>
+					  ))}
+					</div>
+				  </label>
+				  <label>
+					成功状态码规则
+					<input value={editForm.http_expected_status} onChange={(e) => setEditForm((prev) => ({ ...prev, http_expected_status: e.target.value }))} placeholder="2xx 或 200,201" />
+				  </label>
+				  <label>
+					请求头（JSON，可选）
+					<AutoGrowTextarea value={editForm.http_headers_text} onChange={(e) => setEditForm((prev) => ({ ...prev, http_headers_text: e.target.value }))} rows={3} placeholder={`{"Authorization":"Bearer xxx"}`} />
+				  </label>
+				  {editForm.http_method !== 'GET' && editForm.http_method !== 'HEAD' ? (
+					<label>
+					  请求体（可选）
+					  <AutoGrowTextarea value={editForm.http_body} onChange={(e) => setEditForm((prev) => ({ ...prev, http_body: e.target.value }))} rows={3} placeholder='{"ping":"pong"}' />
+					</label>
+				  ) : null}
+				</>
 			  ) : null}
 			  {editForm.type === 'ai' ? (
 				<label>

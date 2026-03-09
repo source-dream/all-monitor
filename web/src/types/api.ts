@@ -28,6 +28,15 @@ export type CreateTargetPayload = {
 	config_json: string
 }
 
+export type HTTPMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS'
+
+export type HTTPConfig = {
+	method: HTTPMethod
+	headers: Record<string, string>
+	body: string
+	expected_status: string
+}
+
 export type FinanceSummary = {
 	has_data: boolean
 	currency?: string
