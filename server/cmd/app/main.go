@@ -9,6 +9,7 @@ import (
 	"all-monitor/server/internal/scheduler"
 	"all-monitor/server/internal/service"
 	"all-monitor/server/internal/webstatic"
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -24,10 +25,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/ssh/terminal"
 	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -59,6 +63,14 @@ func main() {
 		log.Fatalf("normalize legacy target types failed: %v", err)
 	} else if changed > 0 {
 		log.Printf("normalized %d legacy targets", changed)
+	}
+
+	if len(os.Args) > 1 && strings.TrimSpace(os.Args[1]) == "reset-admin" {
+		if err := resetAdminInteractive(db); err != nil {
+			log.Fatalf("reset admin failed: %v", err)
+		}
+		log.Printf("admin credentials updated")
+		return
 	}
 
 	authService := &service.AuthService{DB: db, JWTSecret: cfg.JWTSecret}
@@ -119,6 +131,87 @@ func main() {
 	log.Printf("server started at :%s", boundPort)
 	if err := r.RunListener(listener); err != nil {
 		log.Fatalf("run server failed: %v", err)
+	}
+}
+
+func resetAdminInteractive(db *gorm.DB) error {
+	if !terminal.IsTerminal(int(syscall.Stdin)) {
+		return fmt.Errorf("reset-admin requires an interactive terminal")
+	}
+
+	var user model.User
+	if err := db.Order("id asc").First(&user).Error; err != nil {
+		return fmt.Errorf("load admin user failed: %w", err)
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("Current username: %s\n", user.Username)
+	newUsername, err := promptRequiredLine(reader, "New username (3-32 chars): ")
+	if err != nil {
+		return err
+	}
+	if len(newUsername) < 3 || len(newUsername) > 32 {
+		return fmt.Errorf("username length must be between 3 and 32")
+	}
+	if newUsername == user.Username {
+		return fmt.Errorf("new username must be different from current username")
+	}
+
+	newPassword, err := promptRequiredPassword("New password (8-64 chars): ")
+	if err != nil {
+		return err
+	}
+	if len(newPassword) < 8 || len(newPassword) > 64 {
+		return fmt.Errorf("password length must be between 8 and 64")
+	}
+
+	confirmPassword, err := promptRequiredPassword("Confirm new password: ")
+	if err != nil {
+		return err
+	}
+	if newPassword != confirmPassword {
+		return fmt.Errorf("password confirmation does not match")
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	return db.Model(&model.User{}).Where("id = ?", user.ID).Updates(map[string]any{
+		"username":      newUsername,
+		"password_hash": string(hash),
+	}).Error
+}
+
+func promptRequiredLine(reader *bufio.Reader, prompt string) (string, error) {
+	for {
+		fmt.Print(prompt)
+		text, err := reader.ReadString('\n')
+		if err != nil {
+			return "", err
+		}
+		val := strings.TrimSpace(text)
+		if val != "" {
+			return val, nil
+		}
+		fmt.Println("Input is required")
+	}
+}
+
+func promptRequiredPassword(prompt string) (string, error) {
+	for {
+		fmt.Print(prompt)
+		raw, err := terminal.ReadPassword(int(syscall.Stdin))
+		fmt.Println()
+		if err != nil {
+			return "", err
+		}
+		val := strings.TrimSpace(string(raw))
+		if val != "" {
+			return val, nil
+		}
+		fmt.Println("Input is required")
 	}
 }
 

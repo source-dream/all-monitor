@@ -4,7 +4,7 @@ GOOS_NATIVE := $(shell go env GOOS)
 GOARCH_NATIVE := $(shell go env GOARCH)
 APP_VERSION ?= $(shell (git describe --tags --always --dirty 2>/dev/null) || echo v0.0.0)
 
-.PHONY: dev dev-stop web-install web-build server-build build build-linux build-windows release run fmt test clean
+.PHONY: dev dev-stop web-install web-build server-build reset-admin build build-linux build-windows release run fmt test clean
 
 dev:
 	./scripts/dev.sh
@@ -21,6 +21,9 @@ web-build:
 server-build:
 	mkdir -p bin
 	cd server && go build -o ../bin/all-monitor ./cmd/app
+
+reset-admin:
+	cd server && go run ./cmd/app reset-admin
 
 build: web-build server-build
 

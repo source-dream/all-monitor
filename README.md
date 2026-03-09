@@ -94,3 +94,25 @@ docker pull ghcr.io/source-dream/all-monitor:latest && docker rm -f all-monitor 
 - 程序启动时如果当前目录不存在 `.env`，会自动生成默认配置。
 - 自动生成的 `.env` 会包含随机 `JWT_SECRET`，可直接启动。
 - 如需自定义端口、数据库等配置，按需修改 `.env`。
+
+## 本地命令重置管理员账号
+
+### 二进制部署
+
+```bash
+./all-monitor reset-admin
+```
+
+### Docker 部署
+
+容器运行中可直接进入容器执行交互式重置（需要 `-it`）：
+
+```bash
+docker exec -it all-monitor all-monitor reset-admin
+```
+
+如果镜像里未将二进制加入 `PATH`，可使用完整路径：
+
+```bash
+docker exec -it all-monitor /app/all-monitor/all-monitor reset-admin
+```
