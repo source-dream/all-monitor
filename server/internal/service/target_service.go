@@ -2031,6 +2031,9 @@ func shouldTryAlternateProtocol(httpMode string, err error) bool {
 	if strings.Contains(msg, "connection reset") || strings.Contains(msg, "transport connection broken") {
 		return true
 	}
+	if isFetchConnectionDrop(err) {
+		return true
+	}
 	return false
 }
 
@@ -2053,6 +2056,20 @@ func isFetchTimeoutLike(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "awaiting headers") || strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded")
+}
+
+func isFetchConnectionDrop(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "unexpected eof") || strings.Contains(msg, " eof") || strings.HasSuffix(msg, "eof") {
+		return true
+	}
+	if strings.Contains(msg, "server closed") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "broken pipe") {
+		return true
+	}
+	return false
 }
 
 func isFetchProtocolMismatch(err error) bool {
@@ -2153,7 +2170,7 @@ func (s *TargetService) markFetchProtocolSuccess(host string, protocol string) {
 }
 
 func (s *TargetService) markFetchProtocolFailure(host string, protocol string, err error) {
-	if !isFetchTimeoutLike(err) && !isFetchProtocolMismatch(err) {
+	if !isFetchTimeoutLike(err) && !isFetchProtocolMismatch(err) && !isFetchConnectionDrop(err) {
 		return
 	}
 	h := strings.TrimSpace(strings.ToLower(host))

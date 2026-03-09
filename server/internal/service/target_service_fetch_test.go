@@ -39,6 +39,19 @@ func TestShouldTryAlternateProtocol(t *testing.T) {
 	if shouldTryAlternateProtocol(fetchHTTPModeAuto, errors.New("http_status_403")) {
 		t.Fatal("expected http status errors not to trigger switch")
 	}
+	if !shouldTryAlternateProtocol(fetchHTTPModeAuto, errors.New("Get \"https://example.com\": EOF")) {
+		t.Fatal("expected EOF to trigger protocol switch")
+	}
+}
+
+func TestMarkFetchProtocolFailureOnEOF(t *testing.T) {
+	svc := &TargetService{}
+	host := "example.com"
+	svc.markFetchProtocolFailure(host, fetchHTTPModeH2, errors.New("Get \"https://example.com\": EOF"))
+	plan := svc.fetchProtocolPlan(host, fetchHTTPModeAuto)
+	if len(plan) != 2 || plan[0] != fetchHTTPModeH1 {
+		t.Fatalf("expected h2 to be penalized after EOF, got %v", plan)
+	}
 }
 
 func TestIsFetchProtocolMismatch(t *testing.T) {
