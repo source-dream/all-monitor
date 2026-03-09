@@ -133,6 +133,20 @@ type SubscriptionNodeCheck struct {
 	CheckedAt     time.Time `gorm:"index;not null" json:"checked_at"`
 }
 
+type ShareTask struct {
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	Name          string     `gorm:"size:120;not null" json:"name"`
+	ShareToken    string     `gorm:"size:96;uniqueIndex;not null" json:"share_token"`
+	TargetIDsJSON string     `gorm:"type:text;not null" json:"-"`
+	PasswordHash  string     `gorm:"size:255;not null" json:"-"`
+	ExpiresAt     time.Time  `gorm:"index;not null" json:"expires_at"`
+	Enabled       bool       `gorm:"index;not null;default:true" json:"enabled"`
+	CreatedBy     uint       `gorm:"index;not null" json:"created_by"`
+	LastAccessAt  *time.Time `json:"last_access_at"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
 func AutoMigrateModels() []any {
 	return []any{
 		&User{},
@@ -144,5 +158,6 @@ func AutoMigrateModels() []any {
 		&SubscriptionSnapshot{},
 		&SubscriptionNode{},
 		&SubscriptionNodeCheck{},
+		&ShareTask{},
 	}
 }

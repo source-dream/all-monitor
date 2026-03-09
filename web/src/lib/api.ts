@@ -40,6 +40,14 @@ function resolveAPIBase(): string {
 const API_BASE = resolveAPIBase()
 
 async function api<T>(path: string, options?: RequestInit, token?: string): Promise<T> {
+	return request<T>(path, options, token, true)
+}
+
+async function publicApi<T>(path: string, options?: RequestInit): Promise<T> {
+	return request<T>(path, options, undefined, false)
+}
+
+async function request<T>(path: string, options: RequestInit | undefined, token: string | undefined, triggerAuthExpired: boolean): Promise<T> {
 	const headers = new Headers(options?.headers)
 	headers.set('Content-Type', 'application/json')
 	if (token) headers.set('Authorization', `Bearer ${token}`)
@@ -57,7 +65,7 @@ async function api<T>(path: string, options?: RequestInit, token?: string): Prom
 		throw new Error(`请求失败（HTTP ${res.status}）`)
 	}
 
-	if (res.status === 401 || body.code === 40101 || body.code === 40102) {
+	if (triggerAuthExpired && (res.status === 401 || body.code === 40101 || body.code === 40102)) {
 		localStorage.removeItem('all_monitor_token')
 		window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT))
 	}
@@ -69,4 +77,4 @@ async function api<T>(path: string, options?: RequestInit, token?: string): Prom
 }
 
 export type { ApiBody }
-export { api, API_BASE, APP_BASE_PATH, AUTH_EXPIRED_EVENT }
+export { api, publicApi, API_BASE, APP_BASE_PATH, AUTH_EXPIRED_EVENT }

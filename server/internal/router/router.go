@@ -19,6 +19,8 @@ func Register(r *gin.Engine, h *handler.Handler, jwtSecret, basePath string) {
 		api.POST("/init/setup", h.Setup)
 		api.POST("/auth/login", h.Login)
 		api.POST("/ingest/:write_key", h.IngestTracking)
+		api.POST("/public/shares/:token/access", h.PublicShareAccess)
+		api.GET("/public/shares/:token/dashboard", h.PublicShareDashboard)
 	}
 
 	authed := api.Group("", middleware.JWTAuth(jwtSecret))
@@ -49,5 +51,9 @@ func Register(r *gin.Engine, h *handler.Handler, jwtSecret, basePath string) {
 		authed.DELETE("/targets/:id/subscription/nodes/:uid", h.SubscriptionNodeDelete)
 		authed.GET("/preferences/defaults/:scope", h.GetPreferenceDefaults)
 		authed.PUT("/preferences/defaults/:scope", h.UpdatePreferenceDefaults)
+		authed.POST("/shares", h.CreateShareTask)
+		authed.GET("/shares", h.ListShareTasks)
+		authed.PUT("/shares/:id", h.UpdateShareTask)
+		authed.DELETE("/shares/:id", h.DeleteShareTask)
 	}
 }

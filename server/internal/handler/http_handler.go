@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 type Handler struct {
@@ -47,6 +48,24 @@ type createTargetRequest struct {
 	TimeoutMS   int    `json:"timeout_ms"`
 	Enabled     *bool  `json:"enabled"`
 	ConfigJSON  string `json:"config_json"`
+}
+
+type createShareRequest struct {
+	Name      string `json:"name"`
+	TargetIDs []uint `json:"target_ids"`
+	Password  string `json:"password"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+type updateShareRequest struct {
+	Enabled   *bool   `json:"enabled"`
+	Name      *string `json:"name"`
+	Password  *string `json:"password"`
+	ExpiresAt *string `json:"expires_at"`
+}
+
+type shareAccessRequest struct {
+	Password string `json:"password"`
 }
 
 func (h *Handler) Setup(c *gin.Context) {
@@ -814,6 +833,216 @@ func (h *Handler) SubscriptionNodeDelete(c *gin.Context) {
 		return
 	}
 	response.OK(c, data)
+}
+
+func (h *Handler) CreateShareTask(c *gin.Context) {
+	uid, ok := currentUserID(c)
+	if !ok {
+		response.Err(c, 401, 40102, "invalid token")
+		return
+	}
+	var req createShareRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Err(c, 400, 40001, "invalid request")
+		return
+	}
+	parsedExpireAt, err := time.Parse(time.RFC3339, strings.TrimSpace(req.ExpiresAt))
+	if err != nil {
+		response.Err(c, 400, 40051, "invalid expires_at")
+		return
+	}
+	share, createErr := h.Target.CreateShareTask(uid, req.Name, req.TargetIDs, req.Password, parsedExpireAt)
+	if createErr != nil {
+		response.Err(c, 400, 40052, createErr.Error())
+		return
+	}
+	response.OK(c, gin.H{
+		"id":          share.ID,
+		"name":        share.Name,
+		"share_token": share.ShareToken,
+		"expires_at":  share.ExpiresAt,
+		"enabled":     share.Enabled,
+		"created_at":  share.CreatedAt,
+	})
+}
+
+func (h *Handler) ListShareTasks(c *gin.Context) {
+	uid, ok := currentUserID(c)
+	if !ok {
+		response.Err(c, 401, 40102, "invalid token")
+		return
+	}
+	rows, err := h.Target.ListShareTasks(uid)
+	if err != nil {
+		response.Err(c, 500, 50051, "load share tasks failed")
+		return
+	}
+	response.OK(c, rows)
+}
+
+func (h *Handler) UpdateShareTask(c *gin.Context) {
+	uid, ok := currentUserID(c)
+	if !ok {
+		response.Err(c, 401, 40102, "invalid token")
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		response.Err(c, 400, 40003, "invalid id")
+		return
+	}
+	var req updateShareRequest
+	if bindErr := c.ShouldBindJSON(&req); bindErr != nil {
+		response.Err(c, 400, 40001, "invalid request")
+		return
+	}
+	if req.Enabled == nil && req.Name == nil && req.Password == nil && req.ExpiresAt == nil {
+		response.Err(c, 400, 40001, "invalid request")
+		return
+	}
+	var parsedExpire *time.Time
+	if req.ExpiresAt != nil {
+		expiresAtRaw := strings.TrimSpace(*req.ExpiresAt)
+		ts, parseErr := time.Parse(time.RFC3339, expiresAtRaw)
+		if parseErr != nil {
+			response.Err(c, 400, 40051, "invalid expires_at")
+			return
+		}
+		parsedExpire = &ts
+	}
+	if updateErr := h.Target.UpdateShareTask(uid, uint(id), service.ShareTaskUpdate{
+		Enabled:   req.Enabled,
+		Name:      req.Name,
+		Password:  req.Password,
+		ExpiresAt: parsedExpire,
+	}); updateErr != nil {
+		response.Err(c, 400, 40053, updateErr.Error())
+		return
+	}
+	response.OK(c, gin.H{"updated": true})
+}
+
+func (h *Handler) DeleteShareTask(c *gin.Context) {
+	uid, ok := currentUserID(c)
+	if !ok {
+		response.Err(c, 401, 40102, "invalid token")
+		return
+	}
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		response.Err(c, 400, 40003, "invalid id")
+		return
+	}
+	if delErr := h.Target.DeleteShareTask(uid, uint(id)); delErr != nil {
+		response.Err(c, 400, 40054, delErr.Error())
+		return
+	}
+	response.OK(c, gin.H{"deleted": true})
+}
+
+func (h *Handler) PublicShareAccess(c *gin.Context) {
+	var req shareAccessRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Err(c, 400, 40001, "invalid request")
+		return
+	}
+	shareToken := c.Param("token")
+	share, err := h.Target.VerifyShareAccess(shareToken, req.Password)
+	if err != nil {
+		response.Err(c, 401, 40151, err.Error())
+		return
+	}
+	accessToken, signErr := h.signShareAccessToken(share.ID, share.ShareToken)
+	if signErr != nil {
+		response.Err(c, 500, 50052, "create share access token failed")
+		return
+	}
+	response.OK(c, gin.H{
+		"access_token": accessToken,
+		"expires_at":   share.ExpiresAt,
+		"share_name":   share.Name,
+	})
+}
+
+func (h *Handler) PublicShareDashboard(c *gin.Context) {
+	shareToken := c.Param("token")
+	accessToken := strings.TrimSpace(c.Query("access_token"))
+	if accessToken == "" {
+		response.Err(c, 401, 40152, "missing access token")
+		return
+	}
+	shareID, tokenShare, err := h.parseShareAccessToken(accessToken)
+	if err != nil {
+		response.Err(c, 401, 40153, "invalid access token")
+		return
+	}
+	if tokenShare != shareToken || shareID == 0 {
+		response.Err(c, 401, 40153, "invalid access token")
+		return
+	}
+	data, dashErr := h.Target.ShareDashboard(shareToken)
+	if dashErr != nil {
+		response.Err(c, 400, 40055, dashErr.Error())
+		return
+	}
+	response.OK(c, data)
+}
+
+func (h *Handler) signShareAccessToken(shareID uint, shareToken string) (string, error) {
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"share_id":    shareID,
+		"share_token": shareToken,
+		"exp":         time.Now().Add(30 * time.Minute).Unix(),
+	})
+	return token.SignedString([]byte(h.Auth.JWTSecret))
+}
+
+func (h *Handler) parseShareAccessToken(raw string) (uint, string, error) {
+	token, err := jwt.Parse(raw, func(token *jwt.Token) (any, error) {
+		return []byte(h.Auth.JWTSecret), nil
+	})
+	if err != nil || !token.Valid {
+		return 0, "", errors.New("invalid token")
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return 0, "", errors.New("invalid claims")
+	}
+	shareIDRaw, ok := claims["share_id"]
+	if !ok {
+		return 0, "", errors.New("missing share id")
+	}
+	shareID, convErr := parseUintClaim(shareIDRaw)
+	if convErr != nil {
+		return 0, "", convErr
+	}
+	shareToken, _ := claims["share_token"].(string)
+	if strings.TrimSpace(shareToken) == "" {
+		return 0, "", errors.New("missing share token")
+	}
+	return shareID, shareToken, nil
+}
+
+func parseUintClaim(raw any) (uint, error) {
+	switch v := raw.(type) {
+	case float64:
+		if v <= 0 {
+			return 0, errors.New("claim must be positive")
+		}
+		return uint(v), nil
+	case int:
+		if v <= 0 {
+			return 0, errors.New("claim must be positive")
+		}
+		return uint(v), nil
+	case int64:
+		if v <= 0 {
+			return 0, errors.New("claim must be positive")
+		}
+		return uint(v), nil
+	default:
+		return 0, errors.New("invalid claim type")
+	}
 }
 
 type subscriptionConfigPayload struct {

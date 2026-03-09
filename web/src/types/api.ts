@@ -244,6 +244,39 @@ export type PreferenceDefaultsPayload = {
 	updated_at?: string
 }
 
+export type ShareTask = {
+	id: number
+	name: string
+	share_token: string
+	target_count: number
+	expires_at: string
+	enabled: boolean
+	last_access_at?: string
+	created_at: string
+	updated_at: string
+}
+
+export type ShareAccessPayload = {
+	access_token: string
+	expires_at: string
+	share_name: string
+}
+
+export type ShareDashboardPayload = {
+	share: {
+		id: number
+		name: string
+		expires_at: string
+		enabled: boolean
+	}
+	targets: Target[]
+	result_map: Record<number, CheckResult[]>
+	tracking_map: Record<number, TrackingSummary>
+	subscription_map: Record<number, SubscriptionSummary>
+	finance_map: Record<number, FinanceSummary>
+	server_time: string
+}
+
 export type SubscriptionCreateDefaults = {
 	latency_concurrency: number
 	latency_timeout_ms: number

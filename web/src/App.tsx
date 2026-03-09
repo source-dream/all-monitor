@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, InputHTMLAttributes, MouseEvent as ReactMouseEvent } from 'react'
+import type { ChangeEvent, ComponentRef, DragEvent as ReactDragEvent, FormEvent, InputHTMLAttributes, MouseEvent as ReactMouseEvent } from 'react'
 import {
   Activity,
   AlertTriangle,
@@ -13,6 +13,7 @@ import {
   PlayCircle,
   Plus,
   RefreshCcw,
+  Share2,
   ShieldCheck,
   Sun,
   Trash2,
@@ -28,7 +29,7 @@ import { ToastViewport } from './components/ui/ToastViewport'
 import { nodeLatencyState, isSubscriptionNodeAvailable, subscriptionNodeCopyText } from './features/subscription/nodeHelpers'
 import { useToastManager } from './hooks/useToastManager'
 import { useWorkspaceScrollbar } from './hooks/useWorkspaceScrollbar'
-import { api, API_BASE, APP_BASE_PATH, AUTH_EXPIRED_EVENT } from './lib/api'
+import { api, publicApi, API_BASE, APP_BASE_PATH, AUTH_EXPIRED_EVENT } from './lib/api'
 import type { ApiBody } from './lib/api'
 import { copyTextToClipboard } from './lib/clipboard'
 import { fetchGithubReleases, resolveVersionUpdateNotice } from './lib/version'
@@ -44,6 +45,9 @@ import type {
 	PortConfig,
 	PortProtocol,
 	PreferenceDefaultsPayload,
+	ShareAccessPayload,
+	ShareDashboardPayload,
+	ShareTask,
 	SubscriptionConfig,
 	SubscriptionCreateDefaults,
 	SubscriptionLatencyJobEvent,
@@ -183,6 +187,26 @@ function formatDateTime(timeString: string): string {
   return `${dt.toLocaleDateString()} ${dt.toLocaleTimeString()}`
 }
 
+function toDateTimeLocalInputValue(dt: Date): string {
+	const pad = (n: number) => String(n).padStart(2, '0')
+	return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}`
+}
+
+function toRFC3339FromLocalInput(raw: string): string {
+	const dt = new Date(raw)
+	return dt.toISOString()
+}
+
+function buildShareURL(shareToken: string): string {
+	const origin = window.location.origin
+	const base = APP_BASE_PATH === '/' ? '' : APP_BASE_PATH
+	return `${origin}${base}/share/${shareToken}`
+}
+
+function getShareAccessStorageKey(shareToken: string): string {
+	return `all_monitor_share_access_${shareToken}`
+}
+
 function isAuthExpiredMessage(message: string): boolean {
 	return message.includes('登录已失效')
 }
@@ -290,12 +314,16 @@ function getTargetDetailScrollKey(targetID: number): string {
 
 function buildUptimeBlocks(results: CheckResult[]): UptimeBlock[] {
   const now = new Date()
+  const year = now.getFullYear()
+  const month = now.getMonth()
+  const day = now.getDate()
   const latestInHour = new Map<number, CheckResult>()
 
-  // 按小时保留最新检测结果，用于生成全天在线状态条。
+  // 仅按“当天(本地时间)”每小时保留最新检测结果，用于全天在线状态条。
   for (const row of results) {
     const dt = new Date(row.checked_at)
-    const hourKey = Math.floor(dt.getTime() / 3_600_000)
+    if (dt.getFullYear() !== year || dt.getMonth() !== month || dt.getDate() !== day) continue
+    const hourKey = dt.getHours()
     const prev = latestInHour.get(hourKey)
     if (!prev || new Date(row.checked_at).getTime() > new Date(prev.checked_at).getTime()) {
       latestInHour.set(hourKey, row)
@@ -303,9 +331,9 @@ function buildUptimeBlocks(results: CheckResult[]): UptimeBlock[] {
   }
 
   const blocks: UptimeBlock[] = []
-  for (let i = 23; i >= 0; i -= 1) {
-    const slot = new Date(now.getTime() - i * 3_600_000)
-    const key = Math.floor(slot.getTime() / 3_600_000)
+  for (let hour = 0; hour < 24; hour += 1) {
+    const slot = new Date(year, month, day, hour, 0, 0, 0)
+    const key = hour
     const row = latestInHour.get(key)
     if (!row) {
       blocks.push({ label: `${slot.getHours()}:00`, status: 'unknown', latency: null })
@@ -1029,8 +1057,22 @@ function DashboardPage({
   const [bulkRefreshing, setBulkRefreshing] = useState(false)
   const [bulkDisabling, setBulkDisabling] = useState(false)
   const [bulkDeleting, setBulkDeleting] = useState(false)
+  const [bulkSharing, setBulkSharing] = useState(false)
   const [bulkImporting, setBulkImporting] = useState(false)
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false)
+  const [showShareCreateModal, setShowShareCreateModal] = useState(false)
+  const [showShareListModal, setShowShareListModal] = useState(false)
+  const [shareName, setShareName] = useState('')
+  const [sharePassword, setSharePassword] = useState('')
+  const [shareExpiresAt, setShareExpiresAt] = useState(() => toDateTimeLocalInputValue(new Date(Date.now() + 24 * 60 * 60 * 1000)))
+  const [createdShareLink, setCreatedShareLink] = useState('')
+  const [shareTasks, setShareTasks] = useState<ShareTask[]>([])
+  const [loadingShareTasks, setLoadingShareTasks] = useState(false)
+  const [shareRowPendingID, setShareRowPendingID] = useState<number | null>(null)
+  const [editingShareTask, setEditingShareTask] = useState<ShareTask | null>(null)
+  const [editShareName, setEditShareName] = useState('')
+  const [editSharePassword, setEditSharePassword] = useState('')
+  const [editShareExpiresAt, setEditShareExpiresAt] = useState('')
   const [search, setSearch] = useState('')
   const [typeFilter, setTypeFilter] = useState('all')
   const [onlyAbnormal, setOnlyAbnormal] = useState(false)
@@ -1620,6 +1662,115 @@ function DashboardPage({
 	notify.success(`已导出 ${selectedTargets.length} 个目标配置`)
   }
 
+  async function loadShareTasks() {
+	setLoadingShareTasks(true)
+	try {
+		const rows = await api<ShareTask[]>('/api/shares', undefined, token)
+		setShareTasks(rows)
+	} catch (err) {
+		setError((err as Error).message)
+	} finally {
+		setLoadingShareTasks(false)
+	}
+  }
+
+  async function handleCreateShareTask() {
+	if (selectedTargetIds.length === 0) {
+		notify.warning('请先选择需要分享的目标')
+		return
+	}
+	const parsedExpire = new Date(shareExpiresAt)
+	if (!Number.isFinite(parsedExpire.getTime()) || parsedExpire.getTime() <= Date.now()) {
+		notify.warning('过期时间必须晚于当前时间')
+		return
+	}
+	setBulkSharing(true)
+	try {
+		const data = await api<{ share_token: string }>('/api/shares', {
+			method: 'POST',
+			body: JSON.stringify({
+				name: shareName.trim(),
+				target_ids: selectedTargetIds,
+				password: sharePassword,
+				expires_at: toRFC3339FromLocalInput(shareExpiresAt),
+			}),
+		}, token)
+		const link = buildShareURL(data.share_token)
+		setCreatedShareLink(link)
+		notify.success('分享链接已生成')
+		void loadShareTasks()
+	} catch (err) {
+		setError((err as Error).message)
+	} finally {
+		setBulkSharing(false)
+	}
+  }
+
+  async function handleToggleShareTask(task: ShareTask) {
+	setShareRowPendingID(task.id)
+	try {
+		await api(`/api/shares/${task.id}`, {
+			method: 'PUT',
+			body: JSON.stringify({ enabled: !task.enabled }),
+		}, token)
+		await loadShareTasks()
+	} catch (err) {
+		setError((err as Error).message)
+	} finally {
+		setShareRowPendingID(null)
+	}
+  }
+
+  async function handleDeleteShareTask(taskID: number) {
+	setShareRowPendingID(taskID)
+	try {
+		await api(`/api/shares/${taskID}`, { method: 'DELETE' }, token)
+		await loadShareTasks()
+		notify.success('分享任务已删除')
+	} catch (err) {
+		setError((err as Error).message)
+	} finally {
+		setShareRowPendingID(null)
+	}
+  }
+
+  function openShareTaskEdit(task: ShareTask) {
+	setEditingShareTask(task)
+	setEditShareName(task.name)
+	setEditSharePassword('')
+	setEditShareExpiresAt(toDateTimeLocalInputValue(new Date(task.expires_at)))
+  }
+
+  async function handleSaveShareTaskEdit() {
+	if (!editingShareTask) return
+	const parsedExpire = new Date(editShareExpiresAt)
+	if (!Number.isFinite(parsedExpire.getTime()) || parsedExpire.getTime() <= Date.now()) {
+		notify.warning('过期时间必须晚于当前时间')
+		return
+	}
+	setShareRowPendingID(editingShareTask.id)
+	try {
+		const payload: Record<string, string> = {
+			name: editShareName.trim(),
+			expires_at: toRFC3339FromLocalInput(editShareExpiresAt),
+		}
+		if (editSharePassword.trim()) {
+			payload.password = editSharePassword
+		}
+		await api(`/api/shares/${editingShareTask.id}`, {
+			method: 'PUT',
+			body: JSON.stringify(payload),
+		}, token)
+		await loadShareTasks()
+		setEditingShareTask(null)
+		notify.success('分享任务已更新')
+	} catch (err) {
+		setError((err as Error).message)
+	} finally {
+		setShareRowPendingID(null)
+	}
+  }
+
   async function importTargetsFromText(raw: string) {
 	let parsed: unknown
 	try {
@@ -1792,6 +1943,11 @@ function DashboardPage({
 	}
   }, [])
 
+  useEffect(() => {
+	if (!showShareListModal) return
+	void loadShareTasks()
+  }, [showShareListModal])
+
   return (
     <>
       <header className="workspace-header dashboard-nav">
@@ -1842,6 +1998,18 @@ function DashboardPage({
                 <Sun size={16} className="theme-icon sun-icon" />
                 <Moon size={16} className="theme-icon moon-icon" />
               </span>
+            </button>
+            <button
+              type="button"
+              className="mode-toggle-btn"
+              onClick={() => {
+				setShowShareListModal(true)
+				setShowShareCreateModal(false)
+			}}
+              aria-label="查看分享清单"
+              title="分享清单"
+            >
+              <Share2 size={16} />
             </button>
           </div>
         </div>
@@ -1900,14 +2068,6 @@ function DashboardPage({
           >
             {allVisibleSelected ? '取消全选' : '全选'}
           </button>
-          <button
-            type="button"
-            className="chip"
-            onClick={() => importInputRef.current?.click()}
-            disabled={bulkImporting}
-          >
-            {bulkImporting ? '导入中...' : '导入 JSON'}
-          </button>
         </div>
       </section>
 
@@ -1917,6 +2077,15 @@ function DashboardPage({
             <strong>已选 {selectedTargetIds.length} 个目标</strong>
           </div>
           <div className="selection-actions">
+            <button type="button" onClick={() => {
+				setShowShareCreateModal(true)
+				setCreatedShareLink('')
+				setShareName('')
+				setSharePassword('')
+				setShareExpiresAt(toDateTimeLocalInputValue(new Date(Date.now() + 24 * 60 * 60 * 1000)))
+			}} disabled={bulkRefreshing || bulkDisabling || bulkDeleting || bulkImporting || bulkSharing}>
+              批量分享
+            </button>
             <button type="button" onClick={() => void handleBulkExport()} disabled={bulkRefreshing || bulkDisabling || bulkDeleting || bulkImporting}>
               批量导出
             </button>
@@ -2533,6 +2702,134 @@ function DashboardPage({
       </section>
 
     </div>
+	{showShareCreateModal ? (
+	  <div className="overlay" role="dialog" aria-modal="true">
+		<div className="confirm-card panel share-modal">
+		  <h3>批量分享</h3>
+		  <p className="muted">已选择 {selectedTargetIds.length} 个目标，设置密码和到期时间后生成分享链接。</p>
+		  <label>
+			分享名称（可选）
+			<input value={shareName} onChange={(e) => setShareName(e.target.value)} placeholder="例如：生产环境监控看板" />
+		  </label>
+		  <label>
+			分享密码（可选）
+			<input type="text" value={sharePassword} onChange={(e) => setSharePassword(e.target.value)} placeholder="留空表示无需密码" />
+		  </label>
+		  <label>
+			到期时间
+			<input
+			  type="datetime-local"
+			  value={shareExpiresAt}
+			  onChange={(e) => setShareExpiresAt(e.target.value)}
+			  onClick={(e) => openDateTimePicker(e.currentTarget)}
+			  onFocus={(e) => openDateTimePicker(e.currentTarget)}
+			/>
+		  </label>
+		  {createdShareLink ? (
+			<div className="share-link-preview">
+			  <input readOnly value={createdShareLink} />
+			  <button
+				type="button"
+				onClick={() => {
+				  void copyTextToClipboard(createdShareLink).then((ok) => {
+					if (ok) notify.success('分享链接已复制')
+					else notify.error('复制失败')
+				  })
+				}}
+			  >
+				复制链接
+			  </button>
+			</div>
+		  ) : null}
+		  <div className="confirm-actions">
+			<button type="button" onClick={() => setShowShareCreateModal(false)} disabled={bulkSharing}>关闭</button>
+			<button type="button" className="primary" onClick={() => void handleCreateShareTask()} disabled={bulkSharing}>
+			  {bulkSharing ? '生成中...' : '生成分享链接'}
+			</button>
+		  </div>
+		</div>
+	  </div>
+	) : null}
+
+	{showShareListModal ? (
+	  <div className="overlay" role="dialog" aria-modal="true">
+		<div className="confirm-card panel share-modal share-list-modal">
+		  <h3>分享清单</h3>
+		  <p className="muted">可查看并继续编辑分享任务，也可执行禁用或删除操作。</p>
+		  {loadingShareTasks ? <p className="muted">加载中...</p> : null}
+		  {!loadingShareTasks && shareTasks.length === 0 ? <p className="muted">暂无分享任务</p> : null}
+		  {!loadingShareTasks && shareTasks.length > 0 ? (
+			<div className="share-list-wrap">
+			  {shareTasks.map((task) => (
+				<div key={task.id} className="share-list-item">
+				  <div className="share-list-main">
+					<strong>{task.name}</strong>
+					<p className="muted">目标 {task.target_count} 个 · 到期 {formatDateTime(task.expires_at)} · {task.enabled ? '已启用' : '已禁用'}</p>
+				  </div>
+				  <div className="share-list-actions">
+					<button
+					  type="button"
+					  onClick={() => {
+						void copyTextToClipboard(buildShareURL(task.share_token)).then((ok) => {
+						  if (ok) notify.success('分享链接已复制')
+						  else notify.error('复制失败')
+						})
+					  }}
+					  disabled={shareRowPendingID === task.id}
+					>
+					  复制
+					</button>
+					<button type="button" onClick={() => void handleToggleShareTask(task)} disabled={shareRowPendingID === task.id}>
+					  {task.enabled ? '禁用' : '启用'}
+					</button>
+					<button type="button" onClick={() => openShareTaskEdit(task)} disabled={shareRowPendingID === task.id}>编辑</button>
+					<button type="button" className="danger-btn" onClick={() => void handleDeleteShareTask(task.id)} disabled={shareRowPendingID === task.id}>
+					  删除
+					</button>
+				  </div>
+				</div>
+			  ))}
+			</div>
+		  ) : null}
+		  <div className="confirm-actions">
+			<button type="button" onClick={() => void loadShareTasks()} disabled={loadingShareTasks}>刷新</button>
+			<button type="button" onClick={() => setShowShareListModal(false)}>关闭</button>
+		  </div>
+		</div>
+	  </div>
+	) : null}
+
+	{editingShareTask ? (
+	  <div className="overlay" role="dialog" aria-modal="true">
+		<div className="confirm-card panel share-modal">
+		  <h3>编辑分享任务</h3>
+		  <label>
+			分享名称
+			<input value={editShareName} onChange={(e) => setEditShareName(e.target.value)} />
+		  </label>
+		  <label>
+			分享密码（留空则不修改）
+			<input type="text" value={editSharePassword} onChange={(e) => setEditSharePassword(e.target.value)} placeholder="输入新密码后保存" />
+		  </label>
+		  <label>
+			到期时间
+			<input
+			  type="datetime-local"
+			  value={editShareExpiresAt}
+			  onChange={(e) => setEditShareExpiresAt(e.target.value)}
+			  onClick={(e) => openDateTimePicker(e.currentTarget)}
+			  onFocus={(e) => openDateTimePicker(e.currentTarget)}
+			/>
+		  </label>
+		  <div className="confirm-actions">
+			<button type="button" onClick={() => setEditingShareTask(null)} disabled={shareRowPendingID === editingShareTask.id}>取消</button>
+			<button type="button" className="primary" onClick={() => void handleSaveShareTaskEdit()} disabled={shareRowPendingID === editingShareTask.id}>
+			  {shareRowPendingID === editingShareTask.id ? '保存中...' : '保存'}
+			</button>
+		  </div>
+		</div>
+	  </div>
+	) : null}
     <ConfirmDialog
       open={confirmBulkDelete}
       title="确认批量删除？"
@@ -2545,6 +2842,558 @@ function DashboardPage({
     />
     </>
   )
+}
+
+function ShareViewPage({ notify }: { notify: ToastNotifier }) {
+	useWorkspaceScrollbar()
+	const navigate = useNavigate()
+	const params = useParams()
+	const shareToken = String(params.token ?? '').trim()
+	const [password, setPassword] = useState('')
+	const [accessToken, setAccessToken] = useState(() => {
+		if (!shareToken) return ''
+		return sessionStorage.getItem(getShareAccessStorageKey(shareToken)) ?? ''
+	})
+	const [loading, setLoading] = useState(false)
+	const [verifying, setVerifying] = useState(false)
+	const [error, setError] = useState('')
+	const [payload, setPayload] = useState<ShareDashboardPayload | null>(null)
+
+	async function loadShareDashboard(tokenValue: string) {
+		if (!shareToken || !tokenValue) return
+		setLoading(true)
+		try {
+			const data = await publicApi<ShareDashboardPayload>(`/api/public/shares/${encodeURIComponent(shareToken)}/dashboard?access_token=${encodeURIComponent(tokenValue)}`)
+			setPayload(data)
+			setError('')
+		} catch (err) {
+			const msg = (err as Error).message
+			setError(msg)
+			if (msg.includes('access token') || msg.includes('已过期') || msg.includes('已禁用')) {
+				sessionStorage.removeItem(getShareAccessStorageKey(shareToken))
+				setAccessToken('')
+			}
+		}
+		setLoading(false)
+	}
+
+	async function handleVerifyShare() {
+		if (!shareToken) {
+			setError('分享链接无效')
+			return
+		}
+		setVerifying(true)
+		try {
+			const data = await publicApi<ShareAccessPayload>(`/api/public/shares/${encodeURIComponent(shareToken)}/access`, {
+				method: 'POST',
+				body: JSON.stringify({ password }),
+			})
+			sessionStorage.setItem(getShareAccessStorageKey(shareToken), data.access_token)
+			setAccessToken(data.access_token)
+			await loadShareDashboard(data.access_token)
+			notify.success('分享验证成功')
+		} catch (err) {
+			setError((err as Error).message)
+		}
+		setVerifying(false)
+	}
+
+	useEffect(() => {
+		if (!accessToken) return
+		const initTimer = window.setTimeout(() => {
+			void loadShareDashboard(accessToken)
+		}, 0)
+		const timer = window.setInterval(() => {
+			void loadShareDashboard(accessToken)
+		}, 10_000)
+		return () => {
+			window.clearInterval(timer)
+			window.clearTimeout(initTimer)
+		}
+	}, [accessToken, shareToken])
+
+	if (!accessToken) {
+		return (
+			<div className="center-wrap">
+				<form className="center-card form-card" onSubmit={(e) => {
+					e.preventDefault()
+					void handleVerifyShare()
+				}}>
+					<h2>查看分享看板</h2>
+					<p>请输入分享密码后查看实时监控卡片。</p>
+					<label>
+						分享密码（可选）
+						<input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+					</label>
+					<button className="primary" type="submit" disabled={verifying}>{verifying ? '验证中...' : '进入看板'}</button>
+					{error ? <p className="error">{error}</p> : null}
+				</form>
+			</div>
+		)
+	}
+
+	const targets = payload?.targets ?? []
+	const resultMap = payload?.result_map ?? {}
+	const trackingMap = payload?.tracking_map ?? {}
+	const subscriptionMap = payload?.subscription_map ?? {}
+	const financeMap = payload?.finance_map ?? {}
+	const shareNowTick = payload?.server_time ? new Date(payload.server_time).getTime() : 0
+
+	return (
+		<div className="workspace dashboard-workspace share-workspace">
+			{error ? <p className="error">{error}</p> : null}
+			{loading ? <p className="muted">数据刷新中...</p> : null}
+			<div className="card-grid">
+				{targets.map((target) => {
+					const rows = resultMap[target.id] ?? []
+					const tracking = trackingMap[target.id]
+					const subscription = subscriptionMap[target.id]
+					const finance = financeMap[target.id]
+					const subscriptionConfig = (target.type === 'subscription' || target.type === 'node_group') ? readSubscriptionConfig(target.config_json) : null
+					const cardExpireAt = subscription?.expire_at || subscriptionConfig?.manual_expire_at || ''
+					const trackingStatus = target.type === 'tracking' ? getTrackingStatusInfo(target, tracking) : null
+					const state = getCardState(target, rows, tracking, subscription)
+					const latest = rows[0]
+					const successRows = rows.filter((x) => x.success)
+					const uptime = rows.length > 0 ? (successRows.length / rows.length) * 100 : 0
+					const avgLatency = successRows.length > 0
+						? Math.round(successRows.reduce((sum, x) => sum + x.latency_ms, 0) / successRows.length)
+						: 0
+					const nextLatencyRunText = (target.type === 'subscription' || target.type === 'node_group')
+						? formatNextRun(subscription?.last_latency_checked_at, subscriptionConfig?.latency_interval_sec ?? 0, shareNowTick)
+						: '--'
+					return (
+						<article className={`panel monitor-card share-compact-card clickable state-${state}`} key={target.id} onClick={() => navigate(`/share/${shareToken}/targets/${target.id}`)}>
+							<div className="card-head">
+								<div className="card-head-main">
+									<div className="card-title-row">
+										<h3>{target.name}</h3>
+										{target.type === 'subscription' ? (
+											<span className={`subscription-fee-badge ${isSubscriptionPaid(subscriptionConfig) ? 'paid' : 'free'}`}>
+												{formatSubscriptionFee(subscriptionConfig)}
+											</span>
+										) : null}
+									</div>
+									{target.type !== 'tracking' && target.type !== 'node_group' ? (
+										<a
+											className="endpoint-link"
+											href={toVisitURL(target.endpoint)}
+											target="_blank"
+											rel="noreferrer"
+											onClick={(event) => {
+												event.preventDefault()
+												event.stopPropagation()
+												void copyTextToClipboard(target.endpoint).then((ok) => {
+													if (ok) notify.success('地址已复制')
+													else notify.error('复制失败')
+												})
+											}}
+											onContextMenu={(event) => {
+												event.preventDefault()
+												event.stopPropagation()
+												window.open(toVisitURL(target.endpoint), '_blank', 'noopener,noreferrer')
+											}}
+											title="左键复制地址，右键打开"
+										>
+											{target.endpoint}
+										</a>
+									) : (
+										<p className="muted">{target.type === 'node_group' ? '手动节点列表' : '被动上报'}</p>
+									)}
+								</div>
+								<div className="card-head-actions">
+									{target.type === 'tracking' && trackingStatus ? (
+										<span className={`status ${trackingStatus.variant}`}>{trackingStatus.label}</span>
+									) : (
+										<span className={`status ${state === 'paused' ? 'paused' : state === 'down' ? 'down' : state === 'degraded' ? 'degraded' : 'ok'}`}>
+											{cardStateLabel(state)}
+										</span>
+									)}
+								</div>
+							</div>
+
+							{target.type === 'tracking' ? (
+								<div className="metrics">
+									<div>
+										<p className="muted">PV(24h)</p>
+										<strong>{tracking?.has_data ? String(tracking.pv ?? 0) : '--'}</strong>
+									</div>
+									<div>
+										<p className="muted">UV(24h)</p>
+										<strong>{tracking?.has_data ? String(tracking.uv ?? 0) : '--'}</strong>
+									</div>
+									<div>
+										<p className="muted">最后上报</p>
+										<strong>{tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '--'}</strong>
+									</div>
+								</div>
+							) : (target.type === 'subscription' || target.type === 'node_group') ? (
+								<div className="metrics">
+									<div>
+										<p className="muted">节点状态</p>
+										<strong>{subscription?.has_data ? `${subscription.available_total ?? 0}/${subscription.node_total ?? 0}` : '--'}</strong>
+									</div>
+									{target.type === 'subscription' ? (
+										<>
+											<div>
+												<p className="muted">剩余流量</p>
+												<strong>{subscription?.has_data ? formatBytes(subscription.remaining_bytes) : '--'}</strong>
+											</div>
+											<div>
+												<p className="muted">到期时间</p>
+												<strong>{cardExpireAt ? formatDateTime(cardExpireAt) : '--'}</strong>
+											</div>
+										</>
+									) : (
+										<>
+											<div>
+												<p className="muted">平均延迟</p>
+												<strong>{subscription?.latency_ms ? `${subscription.latency_ms}ms` : '--'}</strong>
+											</div>
+											<div>
+												<p className="muted">测速状态</p>
+												<strong className="subscription-status-text">{getSubscriptionStatusText(subscription)}</strong>
+											</div>
+										</>
+									)}
+								</div>
+							) : (
+								<div className="metrics">
+									<div>
+										<p className="muted">当前延迟</p>
+										<strong>{latest?.latency_ms ? `${latest.latency_ms}ms` : '--'}</strong>
+									</div>
+									<div>
+										<p className="muted">24h 可用率</p>
+										<strong>{rows.length > 0 ? `${uptime.toFixed(1)}%` : '--'}</strong>
+									</div>
+									<div>
+										<p className="muted">平均延迟</p>
+										<strong>{avgLatency > 0 ? `${avgLatency}ms` : '--'}</strong>
+									</div>
+								</div>
+							)}
+
+							{target.type === 'tracking' ? (
+								<p className="muted">最近事件：{tracking?.last_event_name || '-'}</p>
+							) : (target.type === 'subscription' || target.type === 'node_group') ? (
+								<p className="muted subscription-status-text">订阅状态：{getSubscriptionStatusText(subscription)}</p>
+							) : (
+								<p className="muted">余额：{finance?.has_data ? `${(finance.balance ?? 0).toFixed(2)} ${finance.currency ?? 'USD'}` : '--'}</p>
+							)}
+
+							<div className="card-actions">
+								<span className="card-type-badge">{getTypeLabel(target.type)}</span>
+								<div className="card-meta-right">
+									<span className="muted">
+										{target.type === 'tracking'
+											? `最后上报：${tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '暂无'}`
+											: ((target.type === 'subscription' || target.type === 'node_group')
+												? `${target.type === 'node_group' ? '最近测速' : '最近拉取'}：${subscription?.last_checked_at ? formatAgo(subscription.last_checked_at) : '暂无'}`
+												: `最后检测：${latest ? formatAgo(latest.checked_at) : '暂无'}`)}
+									</span>
+									{target.type === 'tracking' ? null : (
+										<span className="muted">
+											{(target.type === 'subscription' || target.type === 'node_group')
+												? `下次测速：${(subscriptionConfig?.latency_interval_sec ?? 0) > 0 ? nextLatencyRunText : '不定时'}`
+												: '下次检测：--'}
+										</span>
+									)}
+								</div>
+							</div>
+						</article>
+					)
+				})}
+			</div>
+		</div>
+	)
+}
+
+function ShareTargetDetailPage() {
+	useWorkspaceScrollbar()
+	const navigate = useNavigate()
+	const params = useParams()
+	const shareToken = String(params.token ?? '').trim()
+	const targetID = Number(params.id)
+	const [loading, setLoading] = useState(false)
+	const [error, setError] = useState('')
+	const [payload, setPayload] = useState<ShareDashboardPayload | null>(null)
+
+	useEffect(() => {
+		if (!shareToken || !Number.isFinite(targetID) || targetID <= 0) return
+		const accessToken = sessionStorage.getItem(getShareAccessStorageKey(shareToken)) ?? ''
+		if (!accessToken) {
+			navigate(`/share/${shareToken}`, { replace: true })
+			return
+		}
+		const timer = window.setTimeout(() => {
+			setLoading(true)
+			void publicApi<ShareDashboardPayload>(`/api/public/shares/${encodeURIComponent(shareToken)}/dashboard?access_token=${encodeURIComponent(accessToken)}`)
+				.then((data) => {
+					setPayload(data)
+					setError('')
+				})
+				.catch((err: Error) => {
+					setError(err.message)
+				})
+				.finally(() => setLoading(false))
+		}, 0)
+		return () => window.clearTimeout(timer)
+	}, [shareToken, targetID, navigate])
+
+	const target = payload?.targets.find((item) => item.id === targetID) ?? null
+	const rows = useMemo(() => (target ? (payload?.result_map[target.id] ?? []) : []), [target, payload])
+	const serverNow = useMemo(() => {
+		if (payload?.server_time) {
+			const ts = new Date(payload.server_time).getTime()
+			if (Number.isFinite(ts)) return ts
+		}
+		const latestTS = rows.length > 0 ? new Date(rows[0].checked_at).getTime() : 0
+		return Number.isFinite(latestTS) ? latestTS : 0
+	}, [payload, rows])
+	const since24h = serverNow - 24 * 60 * 60 * 1000
+	const rows24h = useMemo(
+		() => rows.filter((row) => new Date(row.checked_at).getTime() >= since24h),
+		[rows, since24h],
+	)
+	const tracking = target ? payload?.tracking_map[target.id] : undefined
+	const subscription = target ? payload?.subscription_map[target.id] : undefined
+	const finance = target ? payload?.finance_map[target.id] : undefined
+	const state = target ? getCardState(target, rows24h, tracking, subscription) : 'normal'
+	const latest = rows24h[0]
+	const successRows = rows24h.filter((row) => row.success)
+	const failureRows = rows24h.filter((row) => !row.success)
+	const uptime = rows24h.length > 0 ? (successRows.length / rows24h.length) * 100 : 0
+	const avgLatency = successRows.length > 0
+		? Math.round(successRows.reduce((sum, row) => sum + row.latency_ms, 0) / successRows.length)
+		: 0
+	const isTrackingTarget = target?.type === 'tracking'
+	const isSubscriptionTarget = target?.type === 'subscription' || target?.type === 'node_group'
+	const isNodeGroupTarget = target?.type === 'node_group'
+	const availableSubscriptionCount = subscription?.has_data ? (subscription.available_total ?? 0) : 0
+
+	const chartSeries = useMemo(() => buildChartSeries(rows24h), [rows24h])
+	const trackingChart = useMemo(() => {
+		const points = rows24h
+			.map((row) => ({
+				ts: new Date(row.checked_at).getTime(),
+				pv: row.success ? 1 : 0,
+				uv: row.success ? 1 : 0,
+			}))
+			.filter((point) => Number.isFinite(point.ts))
+			.sort((a, b) => a.ts - b.ts)
+		return {
+			times: points.map((point) => new Date(point.ts).toLocaleTimeString()),
+			pv: points.map((point) => point.pv),
+			uv: points.map((point) => point.uv),
+		}
+	}, [rows24h])
+
+	const latencyOption = useMemo(() => ({
+		tooltip: {
+			trigger: 'axis',
+			axisPointer: { type: 'cross' },
+			backgroundColor: 'rgba(15,23,42,0.92)',
+			borderColor: '#334155',
+			textStyle: { color: '#e2e8f0' },
+			formatter: (params: Array<{ dataIndex: number; axisValueLabel: string; data: number | null }>) => {
+				const first = params[0]
+				if (!first) return ''
+				const row = chartSeries.rows[first.dataIndex]
+				if (!row) return first.axisValueLabel
+				const statusText = row.success ? '在线' : '异常'
+				const latencyText = row.success ? `${Math.max(0, row.latency_ms)}ms` : '--'
+				return `${formatDateTime(row.checked_at)}<br/>状态: ${statusText}<br/>延迟: ${latencyText}<br/>错误: ${row.error_msg || '无'}`
+			},
+		},
+		grid: { left: 40, right: 16, top: 20, bottom: 28 },
+		xAxis: {
+			type: 'category',
+			data: isTrackingTarget ? trackingChart.times : chartSeries.times,
+			axisLabel: { color: '#94a3b8', fontSize: 11 },
+			axisLine: { lineStyle: { color: '#334155' } },
+		},
+		yAxis: {
+			type: 'value',
+			name: isTrackingTarget ? 'count' : (isNodeGroupTarget ? 'nodes' : 'ms'),
+			nameTextStyle: { color: '#94a3b8' },
+			axisLabel: { color: '#94a3b8' },
+			splitLine: { lineStyle: { color: 'rgba(100,116,139,0.2)' } },
+		},
+		series: [
+			{
+				name: isTrackingTarget ? 'PV' : (isNodeGroupTarget ? '可用节点数' : '延迟'),
+				type: 'line',
+				smooth: true,
+				showSymbol: false,
+				data: isTrackingTarget ? trackingChart.pv : (isNodeGroupTarget ? chartSeries.availability.map((point) => Math.round((point / 100) * Math.max(subscription?.node_total ?? 0, 1))) : chartSeries.latency),
+				lineStyle: { color: '#3b82f6', width: 2 },
+				itemStyle: { color: '#3b82f6' },
+				areaStyle: { color: 'rgba(59,130,246,0.15)' },
+			},
+		],
+	}), [chartSeries, isTrackingTarget, isNodeGroupTarget, trackingChart, subscription])
+
+	const availabilityOption = useMemo(() => ({
+		tooltip: {
+			trigger: 'axis',
+			axisPointer: { type: 'line' },
+			backgroundColor: 'rgba(15,23,42,0.92)',
+			borderColor: '#334155',
+			textStyle: { color: '#e2e8f0' },
+			formatter: (params: Array<{ dataIndex: number; axisValueLabel: string; data: number }>) => {
+				const first = params[0]
+				if (!first) return ''
+				if (isTrackingTarget) return `${first.axisValueLabel}<br/>UV: ${first.data}`
+				if (isNodeGroupTarget) return `${first.axisValueLabel}<br/>可用性: ${Number(first.data ?? 0).toFixed(1)}%`
+				const row = chartSeries.rows[first.dataIndex]
+				const statusText = row?.success ? '在线' : row ? '异常' : '未知'
+				return `${first.axisValueLabel}<br/>可用率: ${first.data}%<br/>状态: ${statusText}`
+			},
+		},
+		grid: { left: 40, right: 16, top: 20, bottom: 28 },
+		xAxis: {
+			type: 'category',
+			data: isTrackingTarget ? trackingChart.times : chartSeries.times,
+			axisLabel: { color: '#94a3b8', fontSize: 11 },
+			axisLine: { lineStyle: { color: '#334155' } },
+		},
+		yAxis: {
+			type: 'value',
+			min: 0,
+			max: isTrackingTarget ? undefined : 100,
+			name: isTrackingTarget ? 'count' : '%',
+			nameTextStyle: { color: '#94a3b8' },
+			axisLabel: { color: '#94a3b8' },
+			splitLine: { lineStyle: { color: 'rgba(100,116,139,0.2)' } },
+		},
+		series: [
+			{
+				name: isTrackingTarget ? 'UV' : (isNodeGroupTarget ? '可用性' : '可用率'),
+				type: 'line',
+				smooth: true,
+				showSymbol: false,
+				data: isTrackingTarget ? trackingChart.uv : chartSeries.availability,
+				lineStyle: { color: '#22c55e', width: 2 },
+				itemStyle: { color: '#22c55e' },
+				areaStyle: { color: 'rgba(34,197,94,0.12)' },
+			},
+		],
+	}), [chartSeries, isTrackingTarget, isNodeGroupTarget, trackingChart])
+
+	const logsToShow = rows24h.slice(0, 100)
+
+	function backToShare() {
+		navigate(`/share/${shareToken}`)
+	}
+
+	return (
+		<div className="workspace detail-workspace">
+			{loading ? <p className="muted">加载中...</p> : null}
+			{error ? <p className="error">{error}</p> : null}
+			{!loading && !target ? <p className="muted">目标不存在或无权访问</p> : null}
+			{target ? (
+				<>
+					<header className="workspace-header">
+						<div className="header-main">
+							<button type="button" className="back-button" onClick={backToShare}>
+								<ArrowLeft size={16} /> 返回
+							</button>
+							<h1 className="detail-title">{target.name}</h1>
+							{target.type !== 'tracking' && target.type !== 'node_group' ? (
+								<a className="endpoint-link" href={toVisitURL(target.endpoint)} target="_blank" rel="noreferrer">
+									{target.endpoint}
+								</a>
+							) : (
+								<p className="muted">{target.type === 'node_group' ? '手动节点列表' : '被动上报（通过 write key 接入）'}</p>
+							)}
+						</div>
+					</header>
+
+					<section className="kpi-grid">
+						<article className="panel metric-card">
+							<p className="panel-title"><ShieldCheck size={15} /> {isTrackingTarget ? '窗口PV' : (isSubscriptionTarget ? '节点状态' : '窗口可用率')}</p>
+							<p className="panel-value">{isTrackingTarget ? String(tracking?.pv ?? 0) : (isSubscriptionTarget ? `${availableSubscriptionCount}/${subscription?.node_total ?? 0}` : (rows24h.length > 0 ? `${uptime.toFixed(1)}%` : '--'))}</p>
+						</article>
+						<article className="panel metric-card">
+							<p className="panel-title"><Gauge size={15} /> {isTrackingTarget ? '窗口UV' : (isSubscriptionTarget ? (isNodeGroupTarget ? '可用节点数' : '剩余流量') : '平均延迟')}</p>
+							<p className="panel-value">{isTrackingTarget ? String(tracking?.uv ?? 0) : (isSubscriptionTarget ? (isNodeGroupTarget ? `${availableSubscriptionCount}` : formatBytes(subscription?.remaining_bytes)) : (avgLatency > 0 ? `${avgLatency}ms` : '--'))}</p>
+						</article>
+						<article className="panel metric-card">
+							<p className="panel-title"><AlertTriangle size={15} /> {isTrackingTarget ? '最近事件' : (isSubscriptionTarget ? (isNodeGroupTarget ? '节点状态' : '订阅状态') : '失败次数')}</p>
+							<p className={`panel-value ${isSubscriptionTarget ? 'subscription-status-value' : ''}`}>{isTrackingTarget ? (tracking?.last_event_name || '-') : (isSubscriptionTarget ? getSubscriptionStatusText(subscription) : String(failureRows.length))}</p>
+						</article>
+						<article className="panel metric-card">
+							<p className="panel-title"><Clock3 size={15} /> {isTrackingTarget ? '最后事件' : (isSubscriptionTarget ? (isNodeGroupTarget ? '最近测速' : '最近拉取') : '最后检测')}</p>
+							<p className="panel-value">{isTrackingTarget ? (tracking?.last_event_at ? formatAgo(tracking.last_event_at) : '--') : (isSubscriptionTarget ? (subscription?.last_checked_at ? formatAgo(subscription.last_checked_at) : '--') : (latest?.checked_at ? formatAgo(latest.checked_at) : '--'))}</p>
+							{!isTrackingTarget ? <p className="muted">{cardStateLabel(state)}</p> : null}
+						</article>
+						{target.type === 'ai' || target.type === 'api' ? (
+							<>
+								<article className="panel metric-card">
+									<p className="panel-title"><ShieldCheck size={15} /> 余额</p>
+									<p className="panel-value">{finance?.has_data ? `${(finance.balance ?? 0).toFixed(2)} ${finance.currency ?? 'USD'}` : '--'}</p>
+								</article>
+								<article className="panel metric-card">
+									<p className="panel-title"><Clock3 size={15} /> 24h 消耗</p>
+									<p className="panel-value">{finance?.has_data ? `${(finance.daily_spent ?? 0).toFixed(2)} ${finance.currency ?? 'USD'}` : '--'}</p>
+								</article>
+							</>
+						) : null}
+					</section>
+
+					<section className={`detail-grid ${isNodeGroupTarget ? 'detail-grid-node-group' : ''}`}>
+						<article className="panel">
+							<div className="panel-head">
+								<h3><Activity size={16} /> 监控趋势</h3>
+								<span>24H · {getTypeLabel(target.type)}</span>
+							</div>
+							<div className="chart-grid">
+								<div className="chart-panel">
+									<div className="panel-head">
+										<h3>{isTrackingTarget ? 'PV趋势' : (isNodeGroupTarget ? '可用节点数趋势' : '延迟趋势')}</h3>
+										<span>按悬浮位置查看时点</span>
+									</div>
+									<ReactECharts option={latencyOption} style={{ height: 220 }} notMerge lazyUpdate />
+								</div>
+								<div className="chart-panel">
+									<div className="panel-head">
+										<h3>{isTrackingTarget ? 'UV趋势' : (isNodeGroupTarget ? '可用性趋势' : '可用率趋势')}</h3>
+										<span>{isTrackingTarget ? '近似统计（公开模式）' : (isNodeGroupTarget ? '基于公开检测记录' : '累计统计')}</span>
+									</div>
+									<ReactECharts option={availabilityOption} style={{ height: 220 }} notMerge lazyUpdate />
+								</div>
+							</div>
+						</article>
+
+						{!isNodeGroupTarget ? (
+							<article className="panel">
+								<div className="panel-head">
+									<h3><Clock3 size={16} /> 查询日志</h3>
+									<span>最近24小时</span>
+								</div>
+								<div className="logs-list">
+									{logsToShow.map((row) => (
+										<div className="log-row" key={row.id}>
+											<div className="log-row-head">
+												<span className={`status ${row.success ? 'ok' : 'down'}`}>{row.success ? '在线' : '异常'}</span>
+												<span className="muted">{formatDateTime(row.checked_at)}</span>
+											</div>
+											<div className="log-row-body">
+												<span>延迟：{row.success ? `${Math.max(0, row.latency_ms)}ms` : '--'}</span>
+												<span>错误：{row.error_msg || '无'}</span>
+											</div>
+										</div>
+									))}
+									{logsToShow.length === 0 ? <p className="muted">暂无日志</p> : null}
+								</div>
+							</article>
+						) : null}
+					</section>
+				</>
+			) : null}
+		</div>
+	)
 }
 
 function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotifier }) {
@@ -2607,8 +3456,8 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
   const [deviceRankSort, setDeviceRankSort] = useState<'pv' | 'uv' | 'events' | 'recent'>('pv')
   const [userRankSearch, setUserRankSearch] = useState('')
   const [deviceRankSearch, setDeviceRankSearch] = useState('')
-  const startPickerRef = useRef<any>(null)
-  const endPickerRef = useRef<any>(null)
+  const startPickerRef = useRef<ComponentRef<typeof Flatpickr> | null>(null)
+  const endPickerRef = useRef<ComponentRef<typeof Flatpickr> | null>(null)
   const lastSavedEditFormRef = useRef('')
   const drawerMaskPressRef = useRef(false)
 
@@ -4771,6 +5620,9 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 function App() {
   const [initialized, setInitialized] = useState<boolean | null>(null)
   const [token, setToken] = useState<string>(() => localStorage.getItem('all_monitor_token') ?? '')
+  const currentPath = typeof window === 'undefined' ? '' : window.location.pathname
+  const basePathPrefix = APP_BASE_PATH === '/' ? '' : APP_BASE_PATH
+  const isPublicSharePath = currentPath.startsWith(`${basePathPrefix}/share/`)
   const [theme, setTheme] = useState<ThemeMode>(() => {
     const saved = localStorage.getItem('all_monitor_theme')
     if (saved === 'light' || saved === 'dark') return saved
@@ -4882,7 +5734,7 @@ function App() {
 	)
   }
 
-  if (!token) {
+  if (!token && !isPublicSharePath) {
     return (
       <div className="center-wrap">
         <form className="center-card form-card" onSubmit={handleLogin}>
@@ -4922,6 +5774,8 @@ function App() {
             />
           )}
         />
+		<Route path="/share/:token" element={<ShareViewPage notify={notify} />} />
+		<Route path="/share/:token/targets/:id" element={<ShareTargetDetailPage />} />
 		<Route path="/targets/:id" element={<TargetDetailPage token={token} notify={notify} />} />
 		<Route path="/targets/:id/subscription/nodes/:uid" element={<SubscriptionNodeDetailPage token={token} notify={notify} theme={theme} />} />
         <Route path="*" element={<Navigate to="/" replace />} />
