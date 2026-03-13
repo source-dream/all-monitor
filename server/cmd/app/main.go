@@ -227,7 +227,7 @@ func ensureDefaultEnvFile(path string) error {
 		return err
 	}
 
-	content := fmt.Sprintf("APP_PORT=8080\nAPP_BASE_PATH=/\nDB_DRIVER=sqlite\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_USER=sqlite\nDB_PASS=sqlite\nDB_NAME=all_monitor\nSQLITE_DSN=data/all-monitor.db\nJWT_SECRET=%s\nCORS_ALLOW=http://localhost:5173,auto\nIP_REGION_DB=data/ip2region.xdb\n", jwtSecret)
+	content := fmt.Sprintf("APP_PORT=8080\nAPP_BASE_PATH=/\nDB_DRIVER=sqlite\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_USER=sqlite\nDB_PASS=sqlite\nDB_NAME=all_monitor\nSQLITE_DSN=data/all-monitor.db\nJWT_SECRET=%s\nCORS_ALLOW=http://localhost:5173,http://your-node.ts.net:5173,auto\nIP_REGION_DB=data/ip2region.xdb\n", jwtSecret)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return err
 	}
@@ -388,7 +388,15 @@ func isPrivateLANOrigin(origin string) bool {
 	if ip.IsLoopback() {
 		return true
 	}
-	return ip.IsPrivate()
+	return ip.IsPrivate() || isTailScaleCGNAT(ip)
+}
+
+func isTailScaleCGNAT(ip net.IP) bool {
+	v4 := ip.To4()
+	if v4 == nil {
+		return false
+	}
+	return v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
 }
 
 func openDB(cfg *config.Config) (*gorm.DB, error) {

@@ -3072,9 +3072,11 @@ func buildSingBoxOutboundFromURI(uri string) (map[string]any, error) {
 					reality["short_id"] = sid
 				}
 				tlsCfg["reality"] = reality
-				if fp := strings.TrimSpace(q.Get("fp")); fp != "" {
-					tlsCfg["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+				fp := strings.TrimSpace(q.Get("fp"))
+				if fp == "" {
+					fp = "chrome"
 				}
+				tlsCfg["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
 			}
 			out["tls"] = tlsCfg
 		}
@@ -3443,9 +3445,10 @@ func buildSingBoxOutboundFromMap(node model.SubscriptionNode, raw map[string]any
 					reality["short_id"] = sid
 				}
 				tlsCfg["reality"] = reality
-				if fp != "" {
-					tlsCfg["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
+				if fp == "" {
+					fp = "chrome"
 				}
+				tlsCfg["utls"] = map[string]any{"enabled": true, "fingerprint": fp}
 			}
 			out["tls"] = tlsCfg
 		}

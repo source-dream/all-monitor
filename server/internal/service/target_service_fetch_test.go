@@ -123,6 +123,42 @@ func TestBuildSingBoxOutboundFromMapHysteria2(t *testing.T) {
 	}
 }
 
+func TestBuildSingBoxOutboundFromURIVLESSRealityDefaultsUTLSFingerprint(t *testing.T) {
+	out, err := buildSingBoxOutboundFromURI("vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&security=reality&pbk=test-public-key&sid=abcd1234&sni=gateway.icloud.com")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tlsCfg, ok := out["tls"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tls config")
+	}
+	utls, ok := tlsCfg["utls"].(map[string]any)
+	if !ok {
+		t.Fatal("expected utls config")
+	}
+	if got := utls["fingerprint"]; got != "chrome" {
+		t.Fatalf("unexpected default fingerprint: %v", got)
+	}
+}
+
+func TestBuildSingBoxOutboundFromURIVLESSRealityUsesExplicitFingerprint(t *testing.T) {
+	out, err := buildSingBoxOutboundFromURI("vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&security=reality&pbk=test-public-key&sid=abcd1234&sni=gateway.icloud.com&fp=firefox")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	tlsCfg, ok := out["tls"].(map[string]any)
+	if !ok {
+		t.Fatal("expected tls config")
+	}
+	utls, ok := tlsCfg["utls"].(map[string]any)
+	if !ok {
+		t.Fatal("expected utls config")
+	}
+	if got := utls["fingerprint"]; got != "firefox" {
+		t.Fatalf("unexpected fingerprint: %v", got)
+	}
+}
+
 func TestShouldSkipBaselineProbe(t *testing.T) {
 	if !shouldSkipBaselineProbe(model.SubscriptionNode{Protocol: "hysteria2"}) {
 		t.Fatal("expected hysteria2 baseline skip")

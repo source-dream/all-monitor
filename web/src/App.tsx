@@ -5658,8 +5658,8 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 }
 
 function App() {
-  const [initialized, setInitialized] = useState<boolean | null>(null)
   const [token, setToken] = useState<string>(() => localStorage.getItem('all_monitor_token') ?? '')
+  const [showSetupForm, setShowSetupForm] = useState(false)
   const currentPath = typeof window === 'undefined' ? '' : window.location.pathname
   const basePathPrefix = APP_BASE_PATH === '/' ? '' : APP_BASE_PATH
   const isPublicSharePath = currentPath.startsWith(`${basePathPrefix}/share/`)
@@ -5698,12 +5698,6 @@ function App() {
   }, [theme])
 
   useEffect(() => {
-    void api<{ initialized: boolean }>('/api/init/status')
-      .then((d) => setInitialized(d.initialized))
-      .catch((e: Error) => setError(e.message))
-  }, [])
-
-  useEffect(() => {
 	const onAuthExpired = () => {
 		setToken('')
 		setError('登录已失效，请重新登录')
@@ -5723,7 +5717,7 @@ function App() {
           password: form.get('password'),
         }),
       })
-      setInitialized(true)
+      setShowSetupForm(false)
       setError('')
     } catch (err) {
       setError((err as Error).message)
@@ -5749,32 +5743,37 @@ function App() {
     }
   }
 
-  if (initialized === null) {
-    return <div className="center-card">正在检查系统初始化状态...</div>
-  }
-
-  if (!initialized) {
-    return (
-      <div className="center-wrap">
-        <form className="center-card form-card" onSubmit={handleSetup}>
-          <h2>首次初始化</h2>
-          <p>配置管理员账号后即可开始监控。</p>
-          <label>
-            用户名
-            <input name="username" required minLength={3} maxLength={32} />
-          </label>
-          <label>
-            密码
-            <input name="password" type="password" required minLength={8} maxLength={64} />
-          </label>
-          <button className="primary" type="submit">完成初始化</button>
-		  {error ? <p className={isAuthExpiredMessage(error) ? 'auth-expired-tip' : 'error'}>{error}</p> : null}
-		</form>
-	  </div>
-	)
-  }
-
   if (!token && !isPublicSharePath) {
+    if (showSetupForm) {
+      return (
+        <div className="center-wrap">
+          <form className="center-card form-card" onSubmit={handleSetup}>
+            <h2>首次初始化</h2>
+            <p>配置管理员账号后即可开始监控。</p>
+            <label>
+              用户名
+              <input name="username" required minLength={3} maxLength={32} />
+            </label>
+            <label>
+              密码
+              <input name="password" type="password" required minLength={8} maxLength={64} />
+            </label>
+            <button className="primary" type="submit">完成初始化</button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowSetupForm(false)
+                setError('')
+              }}
+            >
+              返回登录
+            </button>
+			{error ? <p className={isAuthExpiredMessage(error) ? 'auth-expired-tip' : 'error'}>{error}</p> : null}
+		  </form>
+		</div>
+	  )
+    }
+
     return (
       <div className="center-wrap">
         <form className="center-card form-card" onSubmit={handleLogin}>
@@ -5789,6 +5788,15 @@ function App() {
             <input name="password" type="password" required />
           </label>
           <button className="primary" type="submit">登录</button>
+		  <button
+			type="button"
+			onClick={() => {
+				setShowSetupForm(true)
+				setError('')
+			}}
+		  >
+			首次使用？初始化管理员
+		  </button>
 		  {error ? <p className={isAuthExpiredMessage(error) ? 'auth-expired-tip' : 'error'}>{error}</p> : null}
 		</form>
 	  </div>
