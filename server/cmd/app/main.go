@@ -227,7 +227,7 @@ func ensureDefaultEnvFile(path string) error {
 		return err
 	}
 
-	content := fmt.Sprintf("APP_PORT=8080\nAPP_BASE_PATH=/\nDB_DRIVER=sqlite\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_USER=sqlite\nDB_PASS=sqlite\nDB_NAME=all_monitor\nSQLITE_DSN=data/all-monitor.db\nJWT_SECRET=%s\nCORS_ALLOW=http://localhost:5173,http://your-node.ts.net:5173,auto\nIP_REGION_DB=data/ip2region.xdb\n", jwtSecret)
+	content := fmt.Sprintf("APP_PORT=8080\nAPP_BASE_PATH=/\nDB_DRIVER=sqlite\nDB_HOST=127.0.0.1\nDB_PORT=5432\nDB_USER=sqlite\nDB_PASS=sqlite\nDB_NAME=all_monitor\nSQLITE_DSN=data/all-monitor.db\nJWT_SECRET=%s\nCORS_ALLOW=*\nIP_REGION_DB=data/ip2region.xdb\n", jwtSecret)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return err
 	}

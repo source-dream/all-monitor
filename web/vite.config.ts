@@ -2,15 +2,6 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import net from 'node:net'
 
-function parseAllowedHosts(raw: string | undefined): string[] {
-  const items = (raw ?? '')
-    .split(',')
-    .map((item) => item.trim())
-    .filter(Boolean)
-
-  return Array.from(new Set(items))
-}
-
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = net.createServer()
@@ -38,7 +29,6 @@ export default defineConfig(async () => {
   const preferredPort = Number(process.env.PORT ?? 5173)
   const devPort = await findDevPort(preferredPort, 20)
   const proxyTarget = process.env.VITE_DEV_API_PROXY_TARGET ?? 'http://127.0.0.1:8080'
-  const allowedHosts = parseAllowedHosts(process.env.VITE_DEV_ALLOWED_HOSTS)
 
   return {
     plugins: [react()],
@@ -50,7 +40,7 @@ export default defineConfig(async () => {
       host: true,
       port: devPort,
       strictPort: true,
-      allowedHosts: allowedHosts.length > 0 ? allowedHosts : undefined,
+      allowedHosts: true as any,
       proxy: {
         '/api': {
           target: proxyTarget,

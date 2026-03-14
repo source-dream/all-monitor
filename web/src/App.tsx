@@ -2540,7 +2540,7 @@ function DashboardPage({
 						onClick={(event) => {
 							event.preventDefault()
 							event.stopPropagation()
-							void copyTextToClipboard(target.endpoint).then((ok) => {
+							void copyTextToClipboard(target.endpoint, 'target endpoint link copy').then((ok) => {
 								if (ok) notify.success('地址已复制')
 								else notify.error('复制失败')
 							})
@@ -2753,7 +2753,7 @@ function DashboardPage({
 			  <button
 				type="button"
 				onClick={() => {
-				  void copyTextToClipboard(createdShareLink).then((ok) => {
+				  void copyTextToClipboard(createdShareLink, 'share link copy').then((ok) => {
 					if (ok) notify.success('分享链接已复制')
 					else notify.error('复制失败')
 				  })
@@ -2792,7 +2792,7 @@ function DashboardPage({
 					<button
 					  type="button"
 					  onClick={() => {
-						void copyTextToClipboard(buildShareURL(task.share_token)).then((ok) => {
+						void copyTextToClipboard(buildShareURL(task.share_token), 'share task link copy').then((ok) => {
 						  if (ok) notify.success('分享链接已复制')
 						  else notify.error('复制失败')
 						})
@@ -3005,7 +3005,7 @@ function ShareViewPage({ notify }: { notify: ToastNotifier }) {
 											onClick={(event) => {
 												event.preventDefault()
 												event.stopPropagation()
-												void copyTextToClipboard(target.endpoint).then((ok) => {
+												void copyTextToClipboard(target.endpoint, 'shared target endpoint link copy').then((ok) => {
 													if (ok) notify.success('地址已复制')
 													else notify.error('复制失败')
 												})
@@ -4224,13 +4224,11 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
   }
 
 	async function handleCopySubscriptionNode(node: SubscriptionNode) {
-	const text = subscriptionNodeCopyText(node)
-	try {
-		await navigator.clipboard.writeText(text)
-		notify.success('节点已复制')
-	} catch {
-		notify.error('复制失败，请检查剪贴板权限')
-	}
+		const text = subscriptionNodeCopyText(node)
+		const contextName = node.name?.trim() || node.node_uid || 'unknown-node'
+		const ok = await copyTextToClipboard(text, `subscription node copy: ${contextName}`)
+		if (ok) notify.success('节点已复制')
+		else notify.error('复制失败，请检查剪贴板权限')
   }
 
 	async function handleDeleteNodeFromCard(node: SubscriptionNode, skipConfirm: boolean) {
@@ -4573,7 +4571,7 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
               rel="noreferrer"
 			  onClick={(event) => {
 				event.preventDefault()
-				void copyTextToClipboard(target.endpoint).then((ok) => {
+				void copyTextToClipboard(target.endpoint, 'detail endpoint link copy').then((ok) => {
 					if (ok) notify.success('地址已复制')
 					else notify.error('复制失败')
 				})
@@ -5659,7 +5657,9 @@ function TargetDetailPage({ token, notify }: { token: string; notify: ToastNotif
 
 function App() {
   const [token, setToken] = useState<string>(() => localStorage.getItem('all_monitor_token') ?? '')
+  const [initialized, setInitialized] = useState<boolean | null>(null)
   const [showSetupForm, setShowSetupForm] = useState(false)
+  const [initStatusError, setInitStatusError] = useState('')
   const currentPath = typeof window === 'undefined' ? '' : window.location.pathname
   const basePathPrefix = APP_BASE_PATH === '/' ? '' : APP_BASE_PATH
   const isPublicSharePath = currentPath.startsWith(`${basePathPrefix}/share/`)
@@ -5696,6 +5696,43 @@ function App() {
     document.documentElement.setAttribute('data-theme', theme)
     localStorage.setItem('all_monitor_theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    let cancelled = false
+    const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+    const checkInitStatus = async () => {
+      setInitStatusError('')
+      setInitialized(null)
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const status = await Promise.race([
+            api<{ initialized: boolean }>('/api/init/status'),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error('初始化状态检查超时')), 5000)
+            }),
+          ])
+          if (cancelled) return
+          setInitialized(status.initialized)
+          setShowSetupForm(!status.initialized)
+          return
+        } catch {
+          if (attempt < 2) {
+            await delay(600 * (attempt + 1))
+            continue
+          }
+          if (cancelled) return
+          setInitStatusError('初始化状态检查失败，请检查后端是否就绪后重试。')
+        }
+      }
+    }
+
+    void checkInitStatus()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
 	const onAuthExpired = () => {
@@ -5743,6 +5780,35 @@ function App() {
     }
   }
 
+  function handleRetryInitStatus() {
+    setInitStatusError('')
+    setInitialized(null)
+    void api<{ initialized: boolean }>('/api/init/status')
+      .then((status) => {
+        setInitialized(status.initialized)
+        setShowSetupForm(!status.initialized)
+      })
+      .catch(() => {
+        setInitStatusError('初始化状态检查失败，请检查后端是否就绪后重试。')
+      })
+  }
+
+  if (initStatusError) {
+    return (
+      <div className="center-wrap">
+        <div className="center-card form-card">
+          <h2>无法确认初始化状态</h2>
+          <p>{initStatusError}</p>
+          <button className="primary" type="button" onClick={handleRetryInitStatus}>重试</button>
+        </div>
+      </div>
+    )
+  }
+
+  if (initialized === null) {
+    return null
+  }
+
   if (!token && !isPublicSharePath) {
     if (showSetupForm) {
       return (
@@ -5788,15 +5854,6 @@ function App() {
             <input name="password" type="password" required />
           </label>
           <button className="primary" type="submit">登录</button>
-		  <button
-			type="button"
-			onClick={() => {
-				setShowSetupForm(true)
-				setError('')
-			}}
-		  >
-			首次使用？初始化管理员
-		  </button>
 		  {error ? <p className={isAuthExpiredMessage(error) ? 'auth-expired-tip' : 'error'}>{error}</p> : null}
 		</form>
 	  </div>

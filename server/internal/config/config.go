@@ -33,7 +33,7 @@ func Load() (*Config, error) {
 		DBName:      getOrDefault("DB_NAME", "all_monitor"),
 		SQLiteDSN:   getOrDefault("SQLITE_DSN", "data/all-monitor.db"),
 		JWTSecret:   os.Getenv("JWT_SECRET"),
-		CORSAllow:   getOrDefault("CORS_ALLOW", "http://localhost:5173"),
+		CORSAllow:   getOrDefault("CORS_ALLOW", "*"),
 		IPRegionDB:  getOrDefault("IP_REGION_DB", "data/ip2region.xdb"),
 	}
 
